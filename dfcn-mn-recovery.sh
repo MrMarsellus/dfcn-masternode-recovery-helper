@@ -646,7 +646,7 @@ main() {
   check_binaries
   choose_mode
 
-  case "${MODE}" in
+    case "${MODE}" in
     recovery)
       run_recovery_mode
       ;;
@@ -662,7 +662,9 @@ main() {
   print_line
   echo "Recovery helper run completed."
   echo "Please continue monitoring the node carefully."
-  echo "Once your masternode has been stable for several days, run this script again and select 'Restore normal mode' to revert from recovery settings."
+  if [[ "${MODE}" == "recovery" ]]; then
+    echo "Once your masternode has been stable for several days, run this script again and select 'Restore normal mode' to revert from recovery settings."
+  fi
   print_line
 }
 

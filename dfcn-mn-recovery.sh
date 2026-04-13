@@ -618,8 +618,8 @@ run_recovery_mode() {
   start_daemon_cautious || exit 1
   interactive_monitoring_menu
   info "Showing final local status snapshot..."
-  show_protx_placeholder
   show_local_status
+  show_protx_placeholder
 }
 
 run_restore_mode() {
@@ -658,6 +658,7 @@ main() {
   print_line
   echo "Recovery helper run completed."
   echo "Please continue monitoring the node carefully."
+  echo "Once your masternode has been stable for several days, run this script again and select 'Restore normal mode' to revert from recovery settings."
   print_line
 }
 

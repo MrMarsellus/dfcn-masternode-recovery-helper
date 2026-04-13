@@ -493,12 +493,12 @@ main() {
   info "Initial checks completed."
   info "Next versions will add stop/start checks, cleanup, addnode validation and recovery mode."
 
+  info "Showing final local status snapshot..."
+  show_local_status
+
   print_line
-  echo "What you still need to do manually for now:"
-  echo "1. Review trusted_addnodes.txt"
-  echo "2. Make the script executable on the VPS"
-  echo "3. Run it as root"
-  echo "4. Later we will extend it with real recovery actions"
+  echo "Recovery helper run completed."
+  echo "Please continue monitoring the node carefully."
   print_line
 }
 

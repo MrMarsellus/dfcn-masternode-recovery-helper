@@ -613,8 +613,8 @@ run_recovery_mode() {
   write_trusted_addnodes_to_conf
   start_daemon_cautious || exit 1
   interactive_monitoring_menu
-  show_protx_placeholder
   info "Showing final local status snapshot..."
+  show_protx_placeholder
   show_local_status
 }
 

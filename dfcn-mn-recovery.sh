@@ -211,6 +211,55 @@ backup_conf() {
   success "Backup created: ${backup_file}"
 }
 
+stop_daemon_cautious() {
+  print_line
+  warn "The next step can stop the daemon and service."
+  warn "This is required for cleanup or recovery actions."
+
+  if ! ask_yes_no "Do you want to try stopping the masternode daemon now?"; then
+    warn "Stop step skipped by user."
+    return 0
+  fi
+
+  info "Trying RPC stop..."
+  run_cli stop >/dev/null 2>&1 || warn "RPC stop did not succeed."
+
+  sleep 5
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    info "Trying systemctl stop..."
+    systemctl stop "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl stop did not succeed."
+    sleep 5
+  fi
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    warn "Daemon is still running."
+
+    if ask_yes_no "Do you want to try a normal kill on remaining daemon processes?"; then
+      pkill -f "${DEFAULT_DAEMON}" || warn "Normal kill did not succeed."
+      sleep 5
+    fi
+  fi
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    warn "Daemon is still running after normal kill."
+
+    if ask_yes_no "Do you want to try a hard kill (kill -9)?"; then
+      pkill -9 -f "${DEFAULT_DAEMON}" || warn "Hard kill did not succeed."
+      sleep 3
+    fi
+  fi
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    error "Daemon still appears to be running."
+    warn "Please investigate manually before continuing with destructive actions."
+    return 1
+  fi
+
+  success "Daemon appears to be stopped."
+  return 0
+}
+
 main() {
   show_intro
   check_root
@@ -223,6 +272,7 @@ main() {
   show_local_status
   check_service_and_process
   backup_conf
+  stop_daemon_cautious
 
   info "Initial checks completed."
   info "Next versions will add stop/start checks, cleanup, addnode validation and recovery mode."

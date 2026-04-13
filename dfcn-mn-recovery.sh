@@ -377,6 +377,33 @@ check_addnode_heights() {
   success "Trusted addnode check completed."
 }
 
+write_trusted_addnodes_to_conf() {
+  print_line
+  warn "The script can now write the verified trusted addnodes to defcon.conf."
+
+  if [ ! -f "${DEFAULT_CONF_FILE}" ]; then
+    error "Config file not found: ${DEFAULT_CONF_FILE}"
+    return 1
+  fi
+
+  if ! ask_yes_no "Do you want to update defcon.conf with the verified trusted addnodes?"; then
+    warn "Config update skipped by user."
+    return 0
+  fi
+
+  sed -i '/^addnode=/d' "${DEFAULT_CONF_FILE}"
+
+  {
+    echo
+    echo "# Trusted addnodes managed by dfcn-mn-recovery.sh"
+    for node in "${GOOD_ADDNODES[@]}"; do
+      echo "addnode=${node}"
+    done
+  } >> "${DEFAULT_CONF_FILE}"
+
+  success "Verified trusted addnodes were written to defcon.conf."
+}
+
 main() {
   show_intro
   check_root
@@ -393,6 +420,7 @@ main() {
   stop_daemon_cautious
   remove_lock_file
   cleanup_recovery_files
+  write_trusted_addnodes_to_conf
 
   info "Initial checks completed."
   info "Next versions will add stop/start checks, cleanup, addnode validation and recovery mode."

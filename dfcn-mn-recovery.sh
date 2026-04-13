@@ -518,8 +518,12 @@ show_protx_placeholder() {
 interactive_monitoring_menu() {
   print_line
   echo "The node must now fully synchronize before you continue."
-  echo "You can use the following menu options to monitor sync progress during this waiting period."
-  echo "Once the required block height has been reached and sync is complete, press x to continue."
+  echo "Use the following menu options to monitor sync progress."
+  echo "Only continue with x when all of the following are true:"
+  echo "  - Local block height matches the reference block height"
+  echo "  - Masternode sync stage is 'MASTERNODE_SYNC_FINISHED'"
+  echo "  - 'Blockchain synced' is true"
+  echo "  - 'Masternode synced' is true"
   print_line
   echo "Interactive monitoring menu"
   echo "Use the following keys:"

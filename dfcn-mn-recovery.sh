@@ -172,6 +172,32 @@ show_local_status() {
   print_line
 }
 
+check_service_and_process() {
+  print_line
+  info "Checking service and daemon process..."
+
+  if systemctl list-unit-files | grep -q "^${DEFAULT_SERVICE}\.service"; then
+    echo "Service file found : ${DEFAULT_SERVICE}.service"
+
+    if systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
+      echo "Service status     : active"
+    else
+      echo "Service status     : not active"
+    fi
+  else
+    warn "Service file ${DEFAULT_SERVICE}.service was not found."
+  fi
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    echo "Daemon process     : running"
+    pgrep -af "${DEFAULT_DAEMON}"
+  else
+    echo "Daemon process     : not running"
+  fi
+
+  print_line
+}
+
 main() {
   show_intro
   check_root
@@ -182,6 +208,7 @@ main() {
   validate_addnodes
   check_binaries
   show_local_status
+  check_service_and_process
 
   info "Initial checks completed."
   info "Next versions will add stop/start checks, cleanup, addnode validation and recovery mode."

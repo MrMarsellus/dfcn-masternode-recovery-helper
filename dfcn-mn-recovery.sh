@@ -116,6 +116,25 @@ show_addnodes() {
   print_line
 }
 
+validate_addnodes() {
+  local invalid_count=0
+
+  for node in "${ADDNODES[@]}"; do
+    if ! echo "$node" | grep -Eq '^[a-zA-Z0-9._-]+:[0-9]+$'; then
+      warn "Invalid addnode format: $node"
+      invalid_count=$((invalid_count + 1))
+    fi
+  done
+
+  if [ "$invalid_count" -gt 0 ]; then
+    error "One or more addnodes have an invalid format."
+    echo "Expected format: IP:PORT or HOSTNAME:PORT"
+    exit 1
+  fi
+
+  success "All trusted addnodes have a valid basic format."
+}
+
 main() {
   show_intro
   check_root
@@ -123,6 +142,7 @@ main() {
   check_files
   load_addnodes
   show_addnodes
+  validate_addnodes
 
   info "Initial checks completed."
   info "Next versions will add stop/start checks, cleanup, addnode validation and recovery mode."

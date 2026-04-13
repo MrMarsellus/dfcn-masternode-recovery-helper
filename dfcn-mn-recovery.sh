@@ -149,6 +149,29 @@ check_binaries() {
   success "Required binaries were found."
 }
 
+run_cli() {
+  "${DEFAULT_CLI}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" "$@"
+}
+
+show_local_status() {
+  print_line
+  info "Checking local node status..."
+
+  local blockcount="unknown"
+  blockcount="$(run_cli getblockcount 2>/dev/null || echo "unavailable")"
+  echo "Local block height : ${blockcount}"
+
+  echo
+  echo "Masternode status:"
+  run_cli masternode status 2>/dev/null || warn "Could not read masternode status."
+
+  echo
+  echo "Masternode sync status:"
+  run_cli mnsync status 2>/dev/null || warn "Could not read mnsync status."
+
+  print_line
+}
+
 main() {
   show_intro
   check_root
@@ -158,6 +181,7 @@ main() {
   show_addnodes
   validate_addnodes
   check_binaries
+  show_local_status
 
   info "Initial checks completed."
   info "Next versions will add stop/start checks, cleanup, addnode validation and recovery mode."

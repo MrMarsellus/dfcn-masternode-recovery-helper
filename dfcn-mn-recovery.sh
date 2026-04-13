@@ -315,6 +315,60 @@ cleanup_recovery_files() {
   success "Selected recovery files and directories were removed."
 }
 
+check_addnode_heights() {
+  print_line
+  info "Checking trusted addnodes..."
+
+  GOOD_ADDNODES=()
+  BAD_ADDNODES=()
+
+  for node in "${ADDNODES[@]}"; do
+    local host
+    local port
+    host="${node%:*}"
+    port="${node##*:}"
+
+    info "Testing ${node}"
+
+    if ! timeout 5 bash -c "echo > /dev/tcp/${host}/${port}" 2>/dev/null; then
+      warn "Port check failed for ${node}"
+      BAD_ADDNODES+=("${node}")
+      continue
+    fi
+
+    run_cli addnode "${node}" onetry >/dev/null 2>&1 || true
+    sleep 3
+
+    if run_cli getpeerinfo 2>/dev/null | grep -q "${host}"; then
+      success "Peer check passed for ${node}"
+      GOOD_ADDNODES+=("${node}")
+    else
+      warn "Peer check failed for ${node}"
+      BAD_ADDNODES+=("${node}")
+    fi
+  done
+
+  print_line
+  echo "Good trusted addnodes:"
+  for node in "${GOOD_ADDNODES[@]}"; do
+    echo " - ${node}"
+  done
+
+  echo
+  echo "Rejected addnodes:"
+  for node in "${BAD_ADDNODES[@]}"; do
+    echo " - ${node}"
+  done
+  print_line
+
+  if [ "${#GOOD_ADDNODES[@]}" -eq 0 ]; then
+    error "No usable trusted addnodes passed the checks."
+    exit 1
+  fi
+
+  success "Trusted addnode check completed."
+}
+
 main() {
   show_intro
   check_root
@@ -323,6 +377,7 @@ main() {
   load_addnodes
   show_addnodes
   validate_addnodes
+  check_addnode_heights
   check_binaries
   show_local_status
   check_service_and_process

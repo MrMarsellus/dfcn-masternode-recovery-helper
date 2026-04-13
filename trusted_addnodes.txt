@@ -1,4 +1,7 @@
-# One addnode per line
-# Format: IP:8192
+# DeFCoN trusted addnodes
+# One node per line
+# Format: IP:PORT
 # Example:
-# 127.0.0.1:8192
+# 1.2.3.4:8192
+
+# Add your trusted nodes below this line

@@ -260,6 +260,61 @@ stop_daemon_cautious() {
   return 0
 }
 
+remove_lock_file() {
+  local lock_file="${DEFAULT_DATA_DIR}/.lock"
+
+  if [ -f "${lock_file}" ]; then
+    if ask_yes_no "A lock file was found. Remove it?"; then
+      rm -f "${lock_file}"
+      success "Lock file removed."
+    else
+      warn "Lock file was not removed."
+    fi
+  else
+    info "No lock file found."
+  fi
+}
+
+cleanup_recovery_files() {
+  print_line
+  warn "Cleanup can delete local blockchain, peer and cache data."
+  warn "Use this only if you really want to rebuild local state."
+
+  if ! ask_yes_no "Do you want to review cleanup targets now?"; then
+    warn "Cleanup step skipped by user."
+    return 0
+  fi
+
+  echo "Planned cleanup targets:"
+  echo " - ${DEFAULT_DATA_DIR}/peers.dat"
+  echo " - ${DEFAULT_DATA_DIR}/banlist.dat"
+  echo " - ${DEFAULT_DATA_DIR}/mncache.dat"
+  echo " - ${DEFAULT_DATA_DIR}/netfulfilled.dat"
+  echo " - ${DEFAULT_DATA_DIR}/llmq"
+  echo " - ${DEFAULT_DATA_DIR}/evodb"
+  echo " - ${DEFAULT_DATA_DIR}/blocks"
+  echo " - ${DEFAULT_DATA_DIR}/chainstate"
+  echo " - ${DEFAULT_DATA_DIR}/indexes"
+  print_line
+
+  if ! ask_yes_no "Do you want to delete these recovery targets now?"; then
+    warn "Cleanup cancelled by user."
+    return 0
+  fi
+
+  rm -f "${DEFAULT_DATA_DIR}/peers.dat"
+  rm -f "${DEFAULT_DATA_DIR}/banlist.dat"
+  rm -f "${DEFAULT_DATA_DIR}/mncache.dat"
+  rm -f "${DEFAULT_DATA_DIR}/netfulfilled.dat"
+  rm -rf "${DEFAULT_DATA_DIR}/llmq"
+  rm -rf "${DEFAULT_DATA_DIR}/evodb"
+  rm -rf "${DEFAULT_DATA_DIR}/blocks"
+  rm -rf "${DEFAULT_DATA_DIR}/chainstate"
+  rm -rf "${DEFAULT_DATA_DIR}/indexes"
+
+  success "Selected recovery files and directories were removed."
+}
+
 main() {
   show_intro
   check_root
@@ -273,6 +328,8 @@ main() {
   check_service_and_process
   backup_conf
   stop_daemon_cautious
+  remove_lock_file
+  cleanup_recovery_files
 
   info "Initial checks completed."
   info "Next versions will add stop/start checks, cleanup, addnode validation and recovery mode."

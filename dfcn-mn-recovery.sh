@@ -626,7 +626,74 @@ run_recovery_mode() {
   show_protx_placeholder
 }
 
+check_ready_for_restore() {
+  while true; do
+    print_line
+    info "Checking if masternode is ready for restore mode..."
+
+    local mn_json
+    local mn_state
+    local mn_status
+    local sync_json
+    local asset_name
+    local is_synced
+
+    mn_json="$(run_cli masternode status 2>/dev/null || echo "")"
+    sync_json="$(run_cli mnsync status 2>/dev/null || echo "")"
+
+    mn_state="$(echo "$mn_json" | jq -r '.state // empty' 2>/dev/null)"
+    mn_status="$(echo "$mn_json" | jq -r '.status // empty' 2>/dev/null)"
+
+    asset_name="$(echo "$sync_json" | jq -r '.AssetName // empty' 2>/dev/null)"
+    is_synced="$(echo "$sync_json" | jq -r '.IsSynced // empty' 2>/dev/null)"
+
+    echo "Masternode state : ${mn_state:-unknown}"
+    echo "Masternode status: ${mn_status:-unknown}"
+    echo "Sync stage       : ${asset_name:-unknown}"
+    echo "IsSynced         : ${is_synced:-unknown}"
+    print_line
+
+    if [[ "$mn_state" == "READY" && "$is_synced" == "true" && "$asset_name" == "MASTERNODE_SYNC_FINISHED" ]]; then
+      success "Masternode appears to be READY and fully synced. Continuing with restore mode."
+      return 0
+    fi
+
+    error "Restore normal mode is not recommended yet."
+    echo "The masternode does not meet the recommended conditions for restore mode:"
+    echo "  - state should be 'READY'"
+    echo "  - sync stage should be 'MASTERNODE_SYNC_FINISHED'"
+    echo "  - 'IsSynced' should be true"
+    print_line
+    echo "Choose how to proceed:"
+    echo "  1) Check status again"
+    echo "  2) Continue with restore mode anyway (not recommended)"
+    echo "  3) Exit without making changes"
+    print_line
+
+    local choice
+    read -r -p "Enter 1, 2 or 3: " choice
+
+    case "$choice" in
+      1)
+        # simply loop again and re-check
+        ;;
+      2)
+        warn "Continuing with restore mode despite not meeting recommended conditions."
+        return 0
+        ;;
+      3)
+        warn "Aborting restore mode at user request."
+        exit 1
+        ;;
+      *)
+        warn "Invalid selection. Please choose 1, 2 or 3."
+        ;;
+    esac
+  done
+}
+
 run_restore_mode() {
+  check_ready_for_restore
   show_local_status
   check_service_and_process
   backup_conf

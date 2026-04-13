@@ -88,11 +88,41 @@ check_files() {
   fi
 }
 
+load_addnodes() {
+  ADDNODES=()
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"
+    line="$(echo "$line" | xargs)"
+
+    if [ -n "$line" ]; then
+      ADDNODES+=("$line")
+    fi
+  done < "${DEFAULT_ADDNODE_FILE}"
+
+  if [ "${#ADDNODES[@]}" -eq 0 ]; then
+    warn "No trusted addnodes were found in ${DEFAULT_ADDNODE_FILE}."
+    warn "Please add at least one trusted node before running recovery steps."
+    exit 1
+  fi
+}
+
+show_addnodes() {
+  print_line
+  echo "Trusted addnodes loaded from file:"
+  for node in "${ADDNODES[@]}"; do
+    echo " - ${node}"
+  done
+  print_line
+}
+
 main() {
   show_intro
   check_root
   show_defaults
   check_files
+  load_addnodes
+  show_addnodes
 
   info "Initial checks completed."
   info "Next versions will add stop/start checks, cleanup, addnode validation and recovery mode."

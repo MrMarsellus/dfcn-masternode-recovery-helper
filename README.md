@@ -22,29 +22,6 @@ Cautious recovery helper for DeFCoN masternodes with trusted addnode support.
 
 ## Usage
 
-### Manual download and run (recommended)
-
-```bash
-cd /root
-wget -O dfcn-mn-recovery.sh "https://raw.githubusercontent.com/MrMarsellus/dfcn-masternode-recovery-helper/main/dfcn-mn-recovery.sh"
-wget -O trusted_addnodes.txt "https://raw.githubusercontent.com/MrMarsellus/dfcn-masternode-recovery-helper/main/trusted_addnodes.txt"
-chmod +x /root/dfcn-mn-recovery.sh
-```
-
-### Optional: review the script before running it
-```bash
-nano /root/dfcn-mn-recovery.sh
-/root/dfcn-mn-recovery.sh
-```
-
-During startup, the script will:
-
-- Show current defaults (user, data dir, binaries, service name, port)
-- Validate that binaries and required files exist
-- Ask you to choose a mode:
-  - `1` = Recovery mode
-  - `2` = Restore normal mode
-
 ### Quick one‑liner (advanced users only)
 
 If you understand the security implications of downloading and executing remote scripts, you can run the helper in one step:
@@ -59,6 +36,33 @@ chmod +x /root/dfcn-mn-recovery.sh && \
 
 > **Security notice:** Always review the script before running it on a production masternode.  
 > You can open `dfcn-mn-recovery.sh` in an editor (for example `nano dfcn-mn-recovery.sh`) and verify its contents before execution.
+
+During startup, the script will:
+
+- Show current defaults (user, data dir, binaries, service name, port)
+- Validate that binaries and required files exist
+- Ask you to choose a mode:
+  - `1` = Recovery mode
+  - `2` = Restore normal mode
+
+### Manual download and run (recommended)
+
+```bash
+cd /root && wget -O dfcn-mn-recovery.sh "https://raw.githubusercontent.com/MrMarsellus/dfcn-masternode-recovery-helper/main/dfcn-mn-recovery.sh" && wget -O trusted_addnodes.txt "https://raw.githubusercontent.com/MrMarsellus/dfcn-masternode-recovery-helper/main/trusted_addnodes.txt" && chmod +x /root/dfcn-mn-recovery.sh
+```
+
+```bash
+/root/dfcn-mn-recovery.sh
+```
+
+### Optional: review the script before running it
+```bash
+nano /root/dfcn-mn-recovery.sh
+```
+
+```bash
+/root/dfcn-mn-recovery.sh
+```
 
 ## Recovery mode overview (Mode 1)
 

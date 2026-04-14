@@ -217,8 +217,15 @@ check_service_and_process() {
   fi
 
   if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    local proc_line pid cmd bin
+    proc_line="$(pgrep -af "${DEFAULT_DAEMON}" | head -n1)"
+    pid="${proc_line%% *}"
+    cmd="${proc_line#* }"
+    bin="${cmd%% *}"  # nur Binary-Pfad
+
     echo "Daemon process     : running"
-    pgrep -af "${DEFAULT_DAEMON}"
+    echo "Daemon PID         : ${pid}"
+    echo "Daemon binary      : ${bin}"
   else
     echo "Daemon process     : not running"
   fi

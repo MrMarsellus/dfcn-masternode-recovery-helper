@@ -584,89 +584,100 @@ restore_normal_mode_conf() {
 
 restore_service_if_needed() {
   if [[ "${SERVICE_WAS_MASKED}" -eq 0 && "${SERVICE_WAS_DISABLED}" -eq 0 ]]; then
-    return 0
+      return 0
   fi
-
+  
   print_line
   info "Recovery helper changed the service state earlier."
-
+  
   if [[ "${SERVICE_WAS_MASKED}" -eq 1 ]]; then
-    echo " - Service was temporarily masked"
+      echo " - Service was temporarily masked"
   fi
-
+  
   if [[ "${SERVICE_WAS_DISABLED}" -eq 1 ]]; then
-    echo " - Service was temporarily disabled"
+      echo " - Service was temporarily disabled"
   fi
-
+  
   print_line
-
+  
   if ! ask_yes_no "Do you want to restore the service state now and start the service?"; then
-    warn "Service restore skipped by user."
-    warn "If needed, restore it manually later with systemctl unmask/enable/start."
-    return 0
+      warn "Service restore skipped by user."
+      warn "If needed, restore it manually later with systemctl unmask/enable/start."
+      return 0
   fi
-
+  
   if [[ "${SERVICE_WAS_MASKED}" -eq 1 ]]; then
-    info "Trying systemctl unmask..."
-    systemctl unmask "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl unmask did not succeed."
-    sleep 2
+      info "Trying systemctl unmask ${DEFAULT_SERVICE}..."
+      if ! systemctl unmask "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+          error "systemctl unmask did not succeed."
+      else
+          success "Service unmasked."
+      fi
+      sleep 2
   fi
-
+  
   if [[ "${SERVICE_WAS_DISABLED}" -eq 1 ]]; then
-    info "Trying systemctl enable..."
-    systemctl enable "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl enable did not succeed."
-    sleep 2
+      info "Trying systemctl enable ${DEFAULT_SERVICE}..."
+      if ! systemctl enable "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+          error "systemctl enable did not succeed."
+      else
+          success "Service enabled."
+      fi
+      sleep 2
   fi
-
-  info "Trying systemctl start..."
-  systemctl start "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl start did not succeed."
-  sleep 5
-
-  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
-    success "Daemon appears to be running after service restore."
+  
+  info "Trying systemctl start ${DEFAULT_SERVICE}..."
+  if ! systemctl start "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+      error "systemctl start did not succeed."
+      echo "Check with: systemctl status ${DEFAULT_SERVICE}"
+      echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
+      sleep 2
   else
-    warn "Daemon does not appear to be running after service restore."
+      sleep 5
+      if systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
+          success "Daemon appears to be running after service restore."
+      else
+          warn "Daemon does not appear to be running after service restore."
+          echo "Check with: systemctl status ${DEFAULT_SERVICE}"
+          echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
+      fi
   fi
 
-  check_service_and_process
+check_service_and_process
 }
 
 start_daemon_cautious() {
-  print_line
-  warn "The script can now try to start the daemon again."
+print_line
+warn "The script can now try to start the daemon again."
 
-  if ! ask_yes_no "Do you want to start the daemon now?"; then
+if ! ask_yes_no "Do you want to start the daemon now?"; then
     warn "Start step skipped by user."
     return 0
-  fi
+fi
 
-  if [[ "${SERVICE_WAS_MASKED}" -eq 1 || "${SERVICE_WAS_DISABLED}" -eq 1 ]]; then
-    warn "The service was disabled or masked earlier."
-    warn "The script will try a manual daemon start for this recovery session."
-  else
-    info "Trying systemctl start..."
-    systemctl start "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl start did not succeed."
-    sleep 5
+info "Ensuring no manual ${DEFAULT_DAEMON} processes are running..."
+pkill -f "${DEFAULT_DAEMON}" >/dev/null 2>&1 || true
+sleep 2
 
-    if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
-      success "Daemon appears to be running."
-      return 0
-    fi
-  fi
+info "Trying systemctl start ${DEFAULT_SERVICE}..."
+if ! systemctl start "${DEFAULT_SERVICE}"; then
+    error "systemctl start did not succeed."
+    echo "Check with: systemctl status ${DEFAULT_SERVICE}"
+    echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
+    return 1
+fi
 
-  warn "Daemon does not appear to be running yet."
-  warn "Trying manual daemon start..."
+sleep 5
 
-  "${DEFAULT_DAEMON}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" >/dev/null 2>&1 &
-  sleep 5
-
-  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
-    success "Daemon appears to be running after manual start."
+if systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
+    success "Daemon appears to be running via systemd."
     return 0
-  fi
-
-  error "Daemon still does not appear to be running."
-  return 1
+else
+    error "Daemon does not appear to be running after systemd start."
+    echo "Check with: systemctl status ${DEFAULT_SERVICE}"
+    echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
+    return 1
+fi
 }
 
 show_protx_placeholder() {

@@ -702,6 +702,9 @@ interactive_monitoring_menu() {
   echo "  l = show last 30 debug.log lines"
   echo "  x = confirm sync is complete and continue"
   print_line
+  echo "The recommended way is to use 'p' (show sync progress) repeatedly and only"
+  echo "continue with 'x' once everything is fully synced and all flags are true."
+  print_line
 
   while true; do
     read -r -p "Choose action [g/s/p/l/x]: " action

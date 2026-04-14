@@ -2,7 +2,7 @@
 
 set -u
 
-SCRIPT_VERSION="0.2.0"
+SCRIPT_VERSION="0.3.0"
 
 DEFAULT_DEFCON_USER="defcon"
 DEFAULT_DEFCON_HOME="/home/defcon"
@@ -19,6 +19,9 @@ MANAGED_END="# END DFCN RECOVERY HELPER MANAGED ADDNODES"
 
 MAX_RANDOM_CANDIDATES=30
 MAX_GOOD_ADDNODES=20
+
+SERVICE_WAS_DISABLED=0
+SERVICE_WAS_MASKED=0
 
 print_line() {
   echo "------------------------------------------------------------"
@@ -59,6 +62,11 @@ show_intro() {
   echo "DeFCoN Masternode Recovery Helper v${SCRIPT_VERSION}"
   echo "Cautious recovery helper for DeFCoN masternodes"
   print_line
+  echo "Available modes:"
+  echo "  1) Recovery (without trusted addnodes)"
+  echo "  2) Recovery with trusted addnodes"
+  echo "  3) Restore normal mode (remove helper-managed addnodes)"
+  print_line
   echo "This tool is designed to help recover a problematic masternode."
   echo "It does NOT guarantee that a PoSe-banned node will recover."
   echo "It will guide you carefully and ask before critical actions."
@@ -86,15 +94,17 @@ check_root() {
   fi
 }
 
-check_files() {
+check_conf_file() {
+  if [ ! -f "${DEFAULT_CONF_FILE}" ]; then
+    error "Config file not found at: ${DEFAULT_CONF_FILE}"
+    exit 1
+  fi
+}
+
+check_addnode_file() {
   if [ ! -f "${DEFAULT_ADDNODE_FILE}" ]; then
     error "trusted_addnodes.txt was not found in the current directory."
     echo "Place the file next to this script and run it again."
-    exit 1
-  fi
-
-  if [ ! -f "${DEFAULT_CONF_FILE}" ]; then
-    error "Config file not found at: ${DEFAULT_CONF_FILE}"
     exit 1
   fi
 }
@@ -107,6 +117,11 @@ check_binaries() {
 
   if [ ! -x "${DEFAULT_DAEMON}" ]; then
     error "defcond was not found or is not executable at: ${DEFAULT_DAEMON}"
+    exit 1
+  fi
+
+  if ! command -v jq >/dev/null 2>&1; then
+    error "jq is required but was not found."
     exit 1
   fi
 
@@ -127,7 +142,7 @@ load_addnodes() {
 
   if [ "${#ADDNODES[@]}" -eq 0 ]; then
     warn "No trusted addnodes were found in ${DEFAULT_ADDNODE_FILE}."
-    warn "Please add at least one trusted node before running recovery."
+    warn "Please add at least one trusted node before running recovery with addnodes."
     exit 1
   fi
 }
@@ -183,13 +198,19 @@ check_service_and_process() {
   print_line
   info "Checking service and daemon process..."
 
-  if systemctl list-unit-files | grep -q "^${DEFAULT_SERVICE}\.service"; then
+  if systemctl list-unit-files | grep -q "^${DEFAULT_SERVICE}\\.service"; then
     echo "Service file found : ${DEFAULT_SERVICE}.service"
 
     if systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
       echo "Service status     : active"
     else
       echo "Service status     : not active"
+    fi
+
+    if systemctl is-enabled "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+      echo "Service enabled    : yes"
+    else
+      echo "Service enabled    : no"
     fi
   else
     warn "Service file ${DEFAULT_SERVICE}.service was not found."
@@ -216,15 +237,17 @@ backup_conf() {
 choose_mode() {
   print_line
   echo "Choose mode:"
-  echo "1. Recovery mode"
-  echo "2. Restore normal mode"
+  echo "1. Recovery (without trusted addnodes)"
+  echo "2. Recovery with trusted addnodes"
+  echo "3. Restore normal mode (remove helper-managed addnodes)"
   print_line
 
-  read -r -p "Enter 1 or 2: " SELECTED_MODE
+  read -r -p "Enter 1, 2 or 3: " SELECTED_MODE
 
   case "${SELECTED_MODE}" in
-    1) MODE="recovery" ;;
-    2) MODE="restore" ;;
+    1) MODE="recovery_plain" ;;
+    2) MODE="recovery_addnodes" ;;
+    3) MODE="restore" ;;
     *)
       error "Invalid mode selected."
       exit 1
@@ -307,10 +330,82 @@ check_addnode_candidates() {
 
   if [ "${#GOOD_ADDNODES[@]}" -lt 3 ]; then
     warn "Fewer than 3 good addnodes passed the checks."
-    warn "Recovery can continue, but confidence is lower."
+    warn "Recovery with addnodes can continue, but confidence is lower."
   fi
 
   success "Trusted addnode candidate checks completed."
+}
+
+verify_daemon_stopped() {
+  local rpc_dead=1
+  local proc_dead=1
+  local service_inactive=1
+
+  if ! pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    proc_dead=0
+  fi
+
+  if systemctl list-unit-files | grep -q "^${DEFAULT_SERVICE}\\.service"; then
+    if ! systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
+      service_inactive=0
+    fi
+  else
+    service_inactive=0
+  fi
+
+  if ! timeout 5 "${DEFAULT_CLI}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" getblockcount >/dev/null 2>&1; then
+    rpc_dead=0
+  fi
+
+  print_line
+  echo "Stop verification:"
+  echo " - Process stopped : $([[ $proc_dead -eq 0 ]] && echo yes || echo no)"
+  echo " - Service inactive: $([[ $service_inactive -eq 0 ]] && echo yes || echo no)"
+  echo " - RPC unreachable : $([[ $rpc_dead -eq 0 ]] && echo yes || echo no)"
+  print_line
+
+  if [[ $proc_dead -eq 0 && $service_inactive -eq 0 && $rpc_dead -eq 0 ]]; then
+    return 0
+  fi
+
+  return 1
+}
+
+show_stop_summary() {
+  print_line
+  echo "Shutdown summary"
+  echo "----------------"
+
+  if systemctl list-unit-files | grep -q "^${DEFAULT_SERVICE}\\.service"; then
+    if systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
+      echo "Service state : active"
+    else
+      echo "Service state : inactive"
+    fi
+
+    if systemctl is-enabled "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+      echo "Service boot  : enabled"
+    else
+      echo "Service boot  : disabled or masked"
+    fi
+  else
+    echo "Service state : service file not found"
+  fi
+
+  if pgrep -af "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    echo "Process state : running"
+    pgrep -af "${DEFAULT_DAEMON}"
+  else
+    echo "Process state : not running"
+  fi
+
+  if timeout 5 "${DEFAULT_CLI}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" getblockcount >/dev/null 2>&1; then
+    echo "RPC state     : responding"
+  else
+    echo "RPC state     : not responding"
+  fi
+
+  print_line
 }
 
 stop_daemon_cautious() {
@@ -323,18 +418,25 @@ stop_daemon_cautious() {
     return 0
   fi
 
-  info "Trying RPC stop..."
-  run_cli stop >/dev/null 2>&1 || warn "RPC stop did not succeed."
-  sleep 5
+  info "Trying systemctl stop first..."
+  systemctl stop "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl stop did not succeed."
+  sleep 8
 
-  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
-    info "Trying systemctl stop..."
-    systemctl stop "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl stop did not succeed."
-    sleep 5
+  if ask_yes_no "Do you want to temporarily disable the service to prevent auto-restart during recovery?"; then
+    info "Trying systemctl disable..."
+    systemctl disable "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl disable did not succeed."
+    SERVICE_WAS_DISABLED=1
+    sleep 3
   fi
 
   if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
-    warn "Daemon is still running."
+    info "Trying RPC stop..."
+    run_cli stop >/dev/null 2>&1 || warn "RPC stop did not succeed."
+    sleep 10
+  fi
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    warn "Daemon is still running after systemctl stop and RPC stop."
 
     if ask_yes_no "Do you want to try a normal kill on remaining daemon processes?"; then
       pkill -f "${DEFAULT_DAEMON}" || warn "Normal kill did not succeed."
@@ -352,13 +454,26 @@ stop_daemon_cautious() {
   fi
 
   if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
-    error "Daemon still appears to be running."
-    warn "Please investigate manually before continuing."
-    return 1
+    warn "Daemon is still running after hard kill."
+
+    if ask_yes_no "Do you want to temporarily mask the service to block all restarts?"; then
+      systemctl mask "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl mask did not succeed."
+      SERVICE_WAS_MASKED=1
+      systemctl stop "${DEFAULT_SERVICE}" >/dev/null 2>&1 || true
+      sleep 5
+    fi
   fi
 
-  success "Daemon appears to be stopped."
-  return 0
+  show_stop_summary
+
+  if verify_daemon_stopped; then
+    success "Daemon and service appear to be fully stopped."
+    return 0
+  fi
+
+  error "Safe stopped state was NOT confirmed."
+  warn "Cleanup or resync actions must not continue."
+  return 1
 }
 
 remove_lock_file() {
@@ -398,13 +513,13 @@ cleanup_recovery_files() {
   echo " - ${DEFAULT_DATA_DIR}/indexes"
   print_line
 
-  if ! ask_yes_no "Do you want to delete these recovery targets now?"; then
+  if ! ask_yes_no "Do మీరు want to delete these recovery targets now?"; then
     warn "Cleanup cancelled by user."
     return 0
   fi
 
   rm -f "${DEFAULT_DATA_DIR}/peers.dat"
-  rm -f "${DEFAULT_DATA_DIR}/banlist.dat"
+  rm -f "${DEFAULT_DATA_DIR}/banlist.dat}"
   rm -f "${DEFAULT_DATA_DIR}/mncache.dat"
   rm -f "${DEFAULT_DATA_DIR}/netfulfilled.dat"
   rm -rf "${DEFAULT_DATA_DIR}/llmq"
@@ -418,7 +533,7 @@ cleanup_recovery_files() {
 
 write_trusted_addnodes_to_conf() {
   print_line
-  warn "The script can now write verified trusted addnodes to defcon.conf."
+  warn "Recovery with trusted addnodes will now manage addnode entries in defcon.conf."
 
   if ! ask_yes_no "Do you want to update defcon.conf with the verified trusted addnodes?"; then
     warn "Config update skipped by user."
@@ -448,7 +563,7 @@ write_trusted_addnodes_to_conf() {
 
 restore_normal_mode_conf() {
   print_line
-  warn "Restore mode will remove the recovery helper managed addnode section."
+  warn "Restore normal mode will remove the helper-managed addnode section from defcon.conf."
 
   if ! ask_yes_no "Do you want to remove the managed trusted addnode section now?"; then
     warn "Restore step skipped by user."
@@ -467,6 +582,55 @@ restore_normal_mode_conf() {
   success "Managed trusted addnode section removed from defcon.conf."
 }
 
+restore_service_if_needed() {
+  if [[ "${SERVICE_WAS_MASKED}" -eq 0 && "${SERVICE_WAS_DISABLED}" -eq 0 ]]; then
+    return 0
+  fi
+
+  print_line
+  info "Recovery helper changed the service state earlier."
+
+  if [[ "${SERVICE_WAS_MASKED}" -eq 1 ]]; then
+    echo " - Service was temporarily masked"
+  fi
+
+  if [[ "${SERVICE_WAS_DISABLED}" -eq 1 ]]; then
+    echo " - Service was temporarily disabled"
+  fi
+
+  print_line
+
+  if ! ask_yes_no "Do you want to restore the service state now and start the service?"; then
+    warn "Service restore skipped by user."
+    warn "If needed, restore it manually later with systemctl unmask/enable/start."
+    return 0
+  fi
+
+  if [[ "${SERVICE_WAS_MASKED}" -eq 1 ]]; then
+    info "Trying systemctl unmask..."
+    systemctl unmask "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl unmask did not succeed."
+    sleep 2
+  fi
+
+  if [[ "${SERVICE_WAS_DISABLED}" -eq 1 ]]; then
+    info "Trying systemctl enable..."
+    systemctl enable "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl enable did not succeed."
+    sleep 2
+  fi
+
+  info "Trying systemctl start..."
+  systemctl start "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl start did not succeed."
+  sleep 5
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    success "Daemon appears to be running after service restore."
+  else
+    warn "Daemon does not appear to be running after service restore."
+  fi
+
+  check_service_and_process
+}
+
 start_daemon_cautious() {
   print_line
   warn "The script can now try to start the daemon again."
@@ -476,13 +640,18 @@ start_daemon_cautious() {
     return 0
   fi
 
-  info "Trying systemctl start..."
-  systemctl start "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl start did not succeed."
-  sleep 5
+  if [[ "${SERVICE_WAS_MASKED}" -eq 1 || "${SERVICE_WAS_DISABLED}" -eq 1 ]]; then
+    warn "The service was disabled or masked earlier."
+    warn "The script will try a manual daemon start for this recovery session."
+  else
+    info "Trying systemctl start..."
+    systemctl start "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl start did not succeed."
+    sleep 5
 
-  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
-    success "Daemon appears to be running."
-    return 0
+    if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+      success "Daemon appears to be running."
+      return 0
+    fi
   fi
 
   warn "Daemon does not appear to be running yet."
@@ -573,9 +742,9 @@ show_sync_progress() {
   local is_failed
   local verification_progress
 
-  block_height="$(run_cli getblockcount 2>/dev/null)"
-  sync_json="$(run_cli mnsync status 2>/dev/null)"
-  chain_json="$(run_cli getblockchaininfo 2>/dev/null)"
+  block_height="$(run_cli getblockcount 2>/dev/null || true)"
+  sync_json="$(run_cli mnsync status 2>/dev/null || true)"
+  chain_json="$(run_cli getblockchaininfo 2>/dev/null || true)"
 
   asset_name="$(echo "$sync_json" | jq -r '.AssetName // "unknown"' 2>/dev/null)"
   is_blockchain_synced="$(echo "$sync_json" | jq -r '.IsBlockchainSynced // "unknown"' 2>/dev/null)"
@@ -606,7 +775,42 @@ show_sync_progress() {
   fi
 }
 
-run_recovery_mode() {
+run_recovery_plain_mode() {
+  info "Selected: Recovery (without trusted addnodes)."
+  print_line
+  echo "This mode performs a cautious recovery WITHOUT changing addnode= settings."
+  echo "Use this for nodes that need a resync or reindex but do not rely on a helper-managed trusted addnode list."
+  print_line
+
+  show_local_status
+  check_service_and_process
+  backup_conf
+  stop_daemon_cautious || exit 1
+
+  if ! verify_daemon_stopped; then
+    error "Verified stopped state was not reached."
+    warn "Aborting before cleanup to avoid corruption."
+    exit 1
+  fi
+
+  remove_lock_file
+  cleanup_recovery_files
+  start_daemon_cautious || exit 1
+  interactive_monitoring_menu
+  info "Showing final local status snapshot..."
+  show_local_status
+  show_protx_placeholder
+  restore_service_if_needed
+}
+
+run_recovery_addnodes_mode() {
+  info "Selected: Recovery with trusted addnodes."
+  print_line
+  echo "This mode performs a cautious recovery AND manages a helper-controlled trusted addnode list in defcon.conf."
+  echo "Use this if you want to guide a problematic node via a curated set of trusted peers."
+  print_line
+
+  check_addnode_file
   load_addnodes
   show_addnodes
   validate_addnodes
@@ -616,6 +820,13 @@ run_recovery_mode() {
   check_service_and_process
   backup_conf
   stop_daemon_cautious || exit 1
+
+  if ! verify_daemon_stopped; then
+    error "Verified stopped state was not reached."
+    warn "Aborting before cleanup to avoid corruption."
+    exit 1
+  fi
+
   remove_lock_file
   cleanup_recovery_files
   write_trusted_addnodes_to_conf
@@ -624,12 +835,13 @@ run_recovery_mode() {
   info "Showing final local status snapshot..."
   show_local_status
   show_protx_placeholder
+  restore_service_if_needed
 }
 
 check_ready_for_restore() {
   while true; do
     print_line
-    info "Checking if masternode is ready for restore mode..."
+    info "Checking if masternode is ready for restore normal mode..."
 
     local mn_json
     local mn_state
@@ -654,19 +866,19 @@ check_ready_for_restore() {
     print_line
 
     if [[ "$mn_state" == "READY" && "$is_synced" == "true" && "$asset_name" == "MASTERNODE_SYNC_FINISHED" ]]; then
-      success "Masternode appears to be READY and fully synced. Continuing with restore mode."
+      success "Masternode appears to be READY and fully synced. Continuing with restore normal mode."
       return 0
     fi
 
     error "Restore normal mode is not recommended yet."
-    echo "The masternode does not meet the recommended conditions for restore mode:"
+    echo "The masternode does not meet the recommended conditions for restore normal mode:"
     echo "  - state should be 'READY'"
     echo "  - sync stage should be 'MASTERNODE_SYNC_FINISHED'"
     echo "  - 'IsSynced' should be true"
     print_line
     echo "Choose how to proceed:"
     echo "  1) Check status again"
-    echo "  2) Continue with restore mode anyway (not recommended)"
+    echo "  2) Continue with restore normal mode anyway (not recommended)"
     echo "  3) Exit without making changes"
     print_line
 
@@ -675,14 +887,13 @@ check_ready_for_restore() {
 
     case "$choice" in
       1)
-        # simply loop again and re-check
         ;;
       2)
-        warn "Continuing with restore mode despite not meeting recommended conditions."
+        warn "Continuing with restore normal mode despite not meeting recommended conditions."
         return 0
         ;;
       3)
-        warn "Aborting restore mode at user request."
+        warn "Aborting restore normal mode at user request."
         exit 1
         ;;
       *)
@@ -693,29 +904,46 @@ check_ready_for_restore() {
 }
 
 run_restore_mode() {
+  info "Selected: Restore normal mode (remove helper-managed addnodes)."
+  print_line
+  echo "This mode is intended to revert changes made by 'Recovery with trusted addnodes'."
+  echo "It will remove the helper-managed addnode section and return defcon.conf to normal mode."
+  print_line
+
   check_ready_for_restore
   show_local_status
   check_service_and_process
   backup_conf
   stop_daemon_cautious || exit 1
+
+  if ! verify_daemon_stopped; then
+    error "Verified stopped state was not reached."
+    warn "Aborting before changing the configuration."
+    exit 1
+  fi
+
   remove_lock_file
   restore_normal_mode_conf
   start_daemon_cautious || exit 1
   info "Showing final local status snapshot..."
   show_local_status
+  restore_service_if_needed
 }
 
 main() {
   show_intro
   check_root
   show_defaults
-  check_files
+  check_conf_file
   check_binaries
   choose_mode
 
   case "${MODE}" in
-    recovery)
-      run_recovery_mode
+    recovery_plain)
+      run_recovery_plain_mode
+      ;;
+    recovery_addnodes)
+      run_recovery_addnodes_mode
       ;;
     restore)
       run_restore_mode
@@ -729,13 +957,14 @@ main() {
   print_line
   echo "Recovery helper run completed."
   echo "Please continue monitoring the node carefully."
-  
-  if [[ "${MODE}" == "recovery" ]]; then
+
+  if [[ "${MODE}" == "recovery_plain" || "${MODE}" == "recovery_addnodes" ]]; then
     print_line
     print_line
-    echo "[Note] Once your masternode has been stable for several days, run this script again and select 'Restore normal mode' to revert from recovery settings."
+    echo "[Note] Once your masternode has been stable for several days, run this script again and select"
+    echo "'Restore normal mode' if you previously used 'Recovery with trusted addnodes' to revert from helper-managed recovery settings."
   fi
-  
+
   print_line
   print_line
 }

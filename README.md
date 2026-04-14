@@ -31,7 +31,7 @@ wget -O trusted_addnodes.txt "https://raw.githubusercontent.com/MrMarsellus/dfcn
 chmod +x /root/dfcn-mn-recovery.sh
 ```
 
-# Optional: review the script before running it
+### Optional: review the script before running it
 ```bash
 nano /root/dfcn-mn-recovery.sh
 /root/dfcn-mn-recovery.sh

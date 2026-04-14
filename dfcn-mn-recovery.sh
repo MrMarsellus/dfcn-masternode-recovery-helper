@@ -323,13 +323,13 @@ stop_daemon_cautious() {
     return 0
   fi
 
-  info "Trying RPC stop..."
-  run_cli stop >/dev/null 2>&1 || warn "RPC stop did not succeed."
-  sleep 5
+  info "Trying systemctl stop..."
+  systemctl stop "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl stop did not succeed."
+  sleep 10
 
   if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
-    info "Trying systemctl stop..."
-    systemctl stop "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl stop did not succeed."
+    info "Trying RPC stop..."
+    run_cli stop >/dev/null 2>&1 || warn "RPC stop did not succeed."
     sleep 5
   fi
 

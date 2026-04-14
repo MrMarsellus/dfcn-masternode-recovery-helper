@@ -787,7 +787,7 @@ show_sync_progress() {
   echo
 
   if [[ "$is_synced" == "true" && "$asset_name" == "MASTERNODE_SYNC_FINISHED" ]]; then
-    success "Sync completed. You can continue with the next recovery step."
+    success "Sync completed. You can continue with 'x' and the next recovery step."
   else
     warn "Your node is still syncing. Please wait before continuing."
   fi

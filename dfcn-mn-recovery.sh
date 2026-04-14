@@ -677,6 +677,10 @@ show_protx_placeholder() {
   echo
   echo 'protx update_service "PROTX_HASH" "IP:8192" "BLS_SECRET_KEY" "" "FEE_SOURCE_ADDRESS"'
   echo
+  echo "[Hint] To copy from PuTTY without stopping the script:"
+  echo "- Do NOT press Ctrl + C or right-click."
+  echo "- Just select text with the left mouse button; it is copied automatically."
+  echo
   echo "Important:"
   echo " - Run this in the controller wallet, not on the VPS."
   echo " - Wait for the ProTx transaction to be confirmed."

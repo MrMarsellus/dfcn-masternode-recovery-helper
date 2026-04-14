@@ -29,7 +29,10 @@ cd /root
 wget -O dfcn-mn-recovery.sh "https://raw.githubusercontent.com/MrMarsellus/dfcn-masternode-recovery-helper/main/dfcn-mn-recovery.sh"
 wget -O trusted_addnodes.txt "https://raw.githubusercontent.com/MrMarsellus/dfcn-masternode-recovery-helper/main/trusted_addnodes.txt"
 chmod +x /root/dfcn-mn-recovery.sh
+```
+
 # Optional: review the script before running it
+```bash
 nano /root/dfcn-mn-recovery.sh
 /root/dfcn-mn-recovery.sh
 ```

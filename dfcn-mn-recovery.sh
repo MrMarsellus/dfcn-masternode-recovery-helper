@@ -513,13 +513,13 @@ cleanup_recovery_files() {
   echo " - ${DEFAULT_DATA_DIR}/indexes"
   print_line
 
-  if ! ask_yes_no "Do మీరు want to delete these recovery targets now?"; then
+  if ! ask_yes_no "Do you want to delete these recovery targets now?"; then
     warn "Cleanup cancelled by user."
     return 0
   fi
 
   rm -f "${DEFAULT_DATA_DIR}/peers.dat"
-  rm -f "${DEFAULT_DATA_DIR}/banlist.dat}"
+  rm -f "${DEFAULT_DATA_DIR}/banlist.dat"
   rm -f "${DEFAULT_DATA_DIR}/mncache.dat"
   rm -f "${DEFAULT_DATA_DIR}/netfulfilled.dat"
   rm -rf "${DEFAULT_DATA_DIR}/llmq"

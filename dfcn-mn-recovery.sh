@@ -965,11 +965,11 @@ main() {
   echo "Recovery helper run completed."
   echo "Please continue monitoring the node carefully."
 
-  if [[ "${MODE}" == "recovery_plain" || "${MODE}" == "recovery_addnodes" ]]; then
-    print_line
-    print_line
-    echo "[Note] Once your masternode has been stable for several days, run this script again and select"
-    echo "'Restore normal mode' if you previously used 'Recovery with trusted addnodes' to revert from helper-managed recovery settings."
+  if [[ "${MODE}" == "recovery_addnodes" ]]; then
+  print_line
+  print_line
+  echo "[Note] Once your masternode has been stable for several days, run this script again and select"
+  echo "'Restore normal mode' to revert from helper-managed trusted addnodes."
   fi
 
   print_line

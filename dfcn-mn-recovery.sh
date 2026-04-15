@@ -232,9 +232,18 @@ prompt_addnodes_source() {
         while true; do
           local line
           read -r -p "addnode: " line
+          # Kommentare weg
           line="${line%%#*}"
           line="$(echo "$line" | xargs)"
           [ -z "$line" ] && break
+        
+          # Führendes "addnode" oder "addnode:" entfernen
+          line="$(echo "$line" | sed -E 's/^[[:space:]]*addnode[:[:space:]]+//i')"
+        
+          # Nur erstes Token nehmen (falls versehentlich mehr eingegeben wurde)
+          line="$(echo "$line" | awk '{print $1}')"
+        
+          [ -z "$line" ] && continue
           ADDNODES+=("$line")
         done
 

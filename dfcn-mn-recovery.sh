@@ -408,6 +408,7 @@ get_local_service_ip() {
   echo ""
   return 1
 }
+
 collect_pose_problem_nodes() {
   print_line
   info "Evaluating live deterministic masternode state for PoSe issues (registered true)..."
@@ -491,13 +492,11 @@ collect_pose_problem_nodes() {
   POSE_BANNED_COUNT=${#POSE_BANNED_IPS[@]}
   POSE_SCORED_COUNT=${#POSE_SCORED_IPS[@]}
   ALL_POSE_COUNT=${#ALL_POSE_IPS[@]}
-
-  print_line
-  echo "PoSe analysis summary (registered true, local IP excluded if detected):"
-  echo " - Unique PoSe-banned masternode IPs   : ${POSE_BANNED_COUNT}"
-  echo " - Unique masternode IPs with score > 0: ${POSE_SCORED_COUNT}"
-  echo " - Total unique service IPs collected  : ${ALL_POSE_COUNT}"
-  print_line
+  
+  POSE_SCORED_NOT_BANNED_COUNT=0
+  if [ "${POSE_SCORED_COUNT}" -ge "${POSE_BANNED_COUNT}" ]; then
+    POSE_SCORED_NOT_BANNED_COUNT=$((POSE_SCORED_COUNT - POSE_BANNED_COUNT))
+  fi
 
   if [ "${ALL_POSE_COUNT}" -eq 0 ]; then
     warn "No problematic masternodes were found in 'registered true' list (after excluding local IP)."
@@ -513,6 +512,12 @@ show_pose_problem_nodes_preview() {
   for ip in "${ALL_POSE_IPS[@]}"; do
     echo " - ${ip}"
   done
+
+  echo
+  echo "PoSe analysis summary (registered true, local IP excluded if detected):"
+  echo " - Already PoSe-banned masternode IPs      : ${POSE_BANNED_COUNT}"
+  echo " - PoSe-scored MN IPs (not banned yet)     : ${POSE_SCORED_NOT_BANNED_COUNT}"
+  echo " - Total problematic masternode IPs to ban : ${ALL_POSE_COUNT}"
   print_line
 }
 

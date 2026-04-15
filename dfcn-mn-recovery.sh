@@ -225,7 +225,6 @@ prompt_addnodes_source() {
         ADDNODES=()
         print_line
 
-        # WICHTIG: zuerst definieren, dann benutzen
         local max_lines=50
 
         echo "Enter trusted addnodes (format IP:PORT or HOSTNAME:PORT)."

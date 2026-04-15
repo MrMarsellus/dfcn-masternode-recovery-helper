@@ -236,15 +236,20 @@ prompt_addnodes_source() {
 
         while [ "$line_count" -lt "$max_lines" ]; do
           local line
-          read -r -p "addnode: " line || break
+          # wenn stdin zu ist oder EOF → raus
+          if ! read -r -p "addnode: " line; then
+            break
+          fi
 
           line="${line%%#*}"
           line="$(echo "$line" | xargs)"
 
+          # Mitgepastete leere Zeilen am Anfang ignorieren
           if [ "$first_non_empty_seen" -eq 0 ] && [ -z "$line" ]; then
             continue
           fi
 
+          # Leere Zeile nach der ersten Adresse beendet die Eingabe
           [ -z "$line" ] && break
 
           first_non_empty_seen=1
@@ -265,6 +270,9 @@ prompt_addnodes_source() {
         if [ "$line_count" -ge "$max_lines" ]; then
           warn "Maximum number of manual addnode input lines (${max_lines}) reached."
         fi
+
+        # Input-Puffer aggressiv leeren, damit keine weiteren \"addnode:\"-Prompts befüttert werden
+        while read -t 0.01 -r _dummy; do :; done
 
         if [ "${#ADDNODES[@]}" -eq 0 ]; then
           error "No addnodes were entered."

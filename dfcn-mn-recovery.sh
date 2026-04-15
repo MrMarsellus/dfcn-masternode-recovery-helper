@@ -227,12 +227,16 @@ prompt_addnodes_source() {
         echo "Enter trusted addnodes (format IP:PORT or HOSTNAME:PORT)."
         echo "Enter an empty line to finish."
         echo "You may enter more, but ideally not much more than ${MAX_RANDOM_CANDIDATES} addnodes."
+        echo "Maximum manual input lines: 80."
         print_line
 
         local first_non_empty_seen=0
-        while true; do
+        local max_lines=80
+        local line_count=0
+
+        while [ "$line_count" -lt "$max_lines" ]; do
           local line
-          read -r -p "addnode: " line
+          read -r -p "addnode: " line || break
 
           line="${line%%#*}"
           line="$(echo "$line" | xargs)"
@@ -244,10 +248,13 @@ prompt_addnodes_source() {
           [ -z "$line" ] && break
 
           first_non_empty_seen=1
+          line_count=$((line_count + 1))
 
+          # Führendes "addnode"/"addnode:" entfernen
           line="$(echo "$line" | sed -E 's/^[[:space:]]*addnode[:[:space:]]+//I')"
           line="$(echo "$line" | awk '{print $1}')"
 
+          # Nur HOST:PORT akzeptieren
           if ! echo "$line" | grep -Eq '^[A-Za-z0-9._-]+:[0-9]+$'; then
             continue
           fi
@@ -255,8 +262,9 @@ prompt_addnodes_source() {
           ADDNODES+=("$line")
         done
 
-        # Rest-Puffer leeren, damit keine "addnode: addnode: ..." mehr nachlaufen
-        while read -t 0.01 -r _dummy; do :; done
+        if [ "$line_count" -ge "$max_lines" ]; then
+          warn "Maximum number of manual addnode input lines (${max_lines}) reached."
+        fi
 
         if [ "${#ADDNODES[@]}" -eq 0 ]; then
           error "No addnodes were entered."

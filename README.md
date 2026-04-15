@@ -1,43 +1,43 @@
 # DeFCoN Masternode Recovery Helper
 
-Cautious recovery helper für DeFCoN-Masternodes mit optionalen trusted Addnodes und PoSe-basiertem temporären Ban-Feature.
+Cautious recovery helper for DeFCoN masternodes with optional trusted addnodes and a PoSe-based temporary ban feature.
 
 ## Features
 
-- Drei geführte Modi:
-  - Recovery ohne trusted addnodes
-  - Recovery mit trusted addnodes
-  - Restore normal mode (Addnode-Revert + optionale PoSe-Unbans)
-- Trusted-Addnodes:
-  - Laden aus `trusted_addnodes.txt`
-  - Randomisierte Kandidatenauswahl und Connectivity-Checks
-  - Schreiben geprüfter Addnodes in einen klar markierten Block in `defcon.conf`
-- Recovery-Sicherheit:
-  - Vorsichtiger Daemon-Stop (systemd + RPC + optional kill) mit Stop-Verifikation
-  - Optionales Deaktivieren/Maskieren des Services gegen Auto-Restarts
-  - Optionales Entfernen von Lockfile und Resync-Cleanup (`peers.dat`, `banlist.*`, `mncache.dat`, `llmq`, `blocks`, `chainstate`, `indexes`, `evodb`)
-- PoSe-Integration:
-  - Auswertung der deterministischen Masternodeliste via `protx list registered true` (inkl. PoSe-banned Nodes) 
-  - Erkennung problematischer MNs:
+- Three guided modes:
+  - Recovery without trusted addnodes
+  - Recovery with trusted addnodes
+  - Restore normal mode (revert helper-managed addnodes + optional PoSe unbans)
+- Trusted addnodes:
+  - Loaded from `trusted_addnodes.txt`
+  - Randomized candidate selection and connectivity checks
+  - Writes verified addnodes into a clearly marked block in `defcon.conf`
+- Recovery safety:
+  - Cautious daemon stop (systemd + RPC + optional kill) with stop verification
+  - Optional disable/mask of the service to prevent unwanted auto-restarts
+  - Optional lockfile removal and resync cleanup (`peers.dat`, `banlist.*`, `mncache.dat`, `llmq`, `blocks`, `chainstate`, `indexes`, `evodb`)
+- PoSe integration:
+  - Evaluates the deterministic masternode list via `protx list registered true` (includes PoSe-banned nodes)
+  - Detects problematic masternodes:
     - PoSe-banned: `state.PoSeBanHeight > 0`
     - PoSe-score: `state.PoSePenalty > 0`
-  - Ableitung der Service-IP aus `state.service` (IPv4) 
-  - Optionale Erstellung einer temporären PoSe-basierten Banliste, die nach Cleanup und Neustart per `setban` angewendet wird 
-  - Tracking-Datei `recovery_pose_bans.txt` mit Zuständen `prepared` und `applied` für sauberes Unban im Restore-Mode
-- Monitoring & Steuerung:
-  - Interaktives Monitoring-Menü (Blockhöhe, `mnsync status`, zusammengefasster Sync-Status, `debug.log`-Tail)
-  - Controller-Wallet-Hinweis mit `protx update_service`-Template nach vollem Sync 
-  - Interaktiver Safety-Check vor Restore (READY + vollständiger MN-Sync)
+  - Derives the service IP from `state.service` (IPv4) 
+  - Optional creation of a temporary PoSe-based banlist that is applied with `setban` after cleanup and restart 
+  - Tracking file `recovery_pose_bans.txt` with states `prepared` and `applied` for clean unban in restore mode
+- Monitoring & control:
+  - Interactive monitoring menu (block height, `mnsync status`, summarized sync state, `debug.log` tail)
+  - Controller-wallet hint with `protx update_service` template after full sync 
+  - Interactive safety check before restore (READY + fully synced MN)
 
-## Dateien
+## Files
 
-- `dfcn-mn-recovery.sh` – Hauptscript
-- `trusted_addnodes.txt` – optionale trusted Addnode-Liste (nur für Mode 2)
-- `recovery_pose_bans.txt` – optionale, vom Script verwaltete PoSe-Banliste (nur wenn PoSe-Feature genutzt wird)
+- `dfcn-mn-recovery.sh` – main script
+- `trusted_addnodes.txt` – optional trusted addnode list (used only in mode 2)
+- `recovery_pose_bans.txt` – optional PoSe banlist managed by the script (only if PoSe feature is used)
 
 ## Installation & Start
 
-**Empfohlen (manuell, prüfbar):**
+**Recommended (manual, reviewable):**
 
 ```bash
 cd /root
@@ -46,30 +46,30 @@ wget -O trusted_addnodes.txt "https://raw.githubusercontent.com/MrMarsellus/dfcn
 chmod +x /root/dfcn-mn-recovery.sh
 ```
 
-Script prüfen (empfohlen):
+Review the script (recommended):
 
 ```bash
 nano /root/dfcn-mn-recovery.sh
 ```
 
-Dann ausführen:
+Then run:
 
 ```bash
 /root/dfcn-mn-recovery.sh
 ```
 
-Beim Start zeigt das Script:
+On startup, the script will:
 
-- aktuelle Defaults (User, Datadir, Binaries, Service, Port)
-- Existenz der Binaries und der Config
-- Modus-Auswahl:
-  - `1` = Recovery ohne trusted addnodes
-  - `2` = Recovery mit trusted addnodes
+- Show current defaults (user, data dir, binaries, service name, port)
+- Validate that binaries and the main config file exist
+- Ask you to choose a mode:
+  - `1` = Recovery without trusted addnodes
+  - `2` = Recovery with trusted addnodes
   - `3` = Restore normal mode
 
-> **Hinweis:** `trusted_addnodes.txt` ist nur für Mode 2 erforderlich.
+> **Note:** `trusted_addnodes.txt` is only required for mode 2.
 
-**Optionaler One-Liner (nur für erfahrene Nutzer, die den Code vorher geprüft haben):**
+**Optional one-liner (only for experienced users who review the code first):**
 
 ```bash
 cd /root && \
@@ -79,82 +79,82 @@ chmod +x /root/dfcn-mn-recovery.sh && \
 /root/dfcn-mn-recovery.sh
 ```
 
-> **Security:** Lade das Script nur aus vertrauenswürdigen Quellen und lies es, bevor du es auf einem produktiven Masternode ausführst.
+> **Security:** Only download the script from trusted sources and read it before running it on a production masternode.
 
-## Mode 1 – Recovery ohne trusted addnodes
+## Mode 1 – Recovery without trusted addnodes
 
-Ablauf (vereinfacht):
+Simplified flow:
 
-1. Lokalen Status und Servicestatus anzeigen.
-2. Backup von `defcon.conf` erstellen.
-3. Daemon/Service vorsichtig stoppen und stoppen verifizieren.
-4. Optional Lockfile entfernen.
-5. Optional lokale Chain-/Peer-/Cache-Daten löschen (erzwungener Resync).
-6. Daemon neu starten.
-7. Optional: PoSe-Feature
-   - Live-Auswertung `protx list registered true` und Anzeige problematischer MNs 
-   - bei Bestätigung: Schreiben von `recovery_pose_bans.txt` (State `prepared`), Anwendung der Bans nach Neustart mit `setban` (State `applied`) 
-8. Interaktives Monitoring-Menü bis vollständiger Sync.
-9. Hinweis für `protx update_service` im Controller-Wallet. 
+1. Show current local status and service state.
+2. Create a backup of `defcon.conf`.
+3. Carefully stop daemon/service and verify that it is really stopped.
+4. Optionally remove the lockfile.
+5. Optionally delete local chain/peer/cache data (forced resync).
+6. Start the daemon again.
+7. Optional PoSe feature:
+   - Live evaluation via `protx list registered true` and display of problematic masternodes 
+   - On confirmation: write `recovery_pose_bans.txt` (state `prepared`) and apply bans after restart using `setban` (state `applied`) 
+8. Open the interactive monitoring menu until full sync is reached.
+9. Show a controller-wallet hint for `protx update_service`.
 
-In diesem Modus werden keine `addnode=`-Einträge erstellt oder verändert.
+In this mode, no `addnode=` entries are created or modified.
 
-## Mode 2 – Recovery mit trusted addnodes
+## Mode 2 – Recovery with trusted addnodes
 
-Zusätzlich zu Mode 1:
+On top of mode 1:
 
-1. Laden und Validieren von `trusted_addnodes.txt`.
-2. Randomisierte Kandidatenauswahl, Port-Check und Peer-Check per `addnode ... onetry` + `getpeerinfo`. 
-3. Anzeige guter vs. verworfener Addnodes.
-4. Bei Bestätigung: Schreiben eines klar abgegrenzten Helper-Blocks mit geprüften Addnodes in `defcon.conf`.
-5. Stop, Cleanup, Restart wie in Mode 1.
-6. Optional: PoSe-Feature wie oben (Vorbereiten → Anwenden nach Restart).
-7. Monitoring und Controller-Wallet-Schritt wie in Mode 1.
+1. Load and validate `trusted_addnodes.txt`.
+2. Random candidate selection, port checks and peer checks using `addnode ... onetry` + `getpeerinfo`. 
+3. Show good vs. rejected addnodes.
+4. On confirmation: write a clearly separated helper block with verified addnodes into `defcon.conf`.
+5. Stop, cleanup, restart as in mode 1.
+6. Optional PoSe feature as above (prepare → apply after restart).
+7. Monitoring and controller-wallet step as in mode 1.
 
-Dieser Modus ist für Nodes gedacht, die beim Wiederaufbau von einem kuratierten Peer-Set profitieren.
+This mode is intended for nodes that benefit from a curated peer set during recovery.
 
 ## Mode 3 – Restore normal mode
 
-Ziel: Helper-Einstellungen zurückbauen, wenn der Node wieder stabil läuft.
+Goal: revert helper changes once the node is stable again.
 
-1. Safety-Check:
-   - `masternode status` + `mnsync status` lesen.
-   - Automatisches Weiter, wenn:
+1. Safety check:
+   - Read `masternode status` and `mnsync status`.
+   - Automatically continue if:
      - `state = READY`
-     - Stage `MASTERNODE_SYNC_FINISHED`
+     - Sync stage `MASTERNODE_SYNC_FINISHED`
      - `IsSynced = true` 
-   - Sonst Warnung + Auswahl:
-     - nochmal prüfen
-     - trotzdem fortfahren (nicht empfohlen)
-     - abbrechen
-2. Lokalen Status + Service anzeigen.
-3. Backup von `defcon.conf`.
-4. Vorsichtiger Stop + Stop-Verifikation.
-5. Optional Lockfile entfernen.
-6. PoSe-Unbans:
-   - Falls `recovery_pose_bans.txt` existiert, werden nur diese IPs per `setban "<ip>" remove` zurückgenommen. 
-   - Nicht (mehr) gebannte IPs werden nur informativ gemeldet.
-   - Datei kann anschließend gelöscht oder behalten werden.
-7. Entfernen des Helper-Addnode-Blocks aus `defcon.conf`.
-8. Neustart, finaler Status und optionales Wiederherstellen des ursprünglichen Service-States.
+   - Otherwise warn and let you choose:
+     - check status again
+     - continue anyway (not recommended)
+     - exit without changes
+2. Show local status and service state.
+3. Create a backup of `defcon.conf`.
+4. Carefully stop daemon/service and verify the stop.
+5. Optionally remove the lockfile.
+6. PoSe unbans:
+   - If `recovery_pose_bans.txt` exists, only those IPs are unbanned via `setban "<ip>" remove`. 
+   - IPs that are no longer banned are reported as info only.
+   - The file can then be deleted or kept.
+7. Remove the helper-managed addnode block from `defcon.conf`.
+8. Restart, show final status and optionally restore the original service state.
 
-## Monitoring-Menü (alle Modi)
+## Monitoring menu (all modes)
 
-Befehle:
+Commands:
 
 - `g` – `getblockcount`
 - `s` – `mnsync status`
-- `p` – zusammengefasste Anzeige (Blockhöhe, Verificationprogress, Stage, Flags)
-- `l` – letzte 30 Zeilen aus `debug.log`
-- `x` – „Node ist fertig synchronisiert, weiter“
+- `p` – summarized view (block height, verification progress, stage, flags)
+- `l` – last 30 lines of `debug.log`
+- `x` – “node is fully synchronized, continue”
 
-Vor `x` sollte gelten:
+Before using `x`, the node should meet all of the following conditions:
 
-- Blockhöhe ≈ Referenz (Explorer/Referenznode)
-- Stage `MASTERNODE_SYNC_FINISHED`
+- Local block height ≈ reference (explorer / reference node)
+- Sync stage `MASTERNODE_SYNC_FINISHED`
 - `Blockchain synced` = `true`
-- `Masternode synced` = `true` 
+- `Masternode synced` = `true`
 
 ## Status
 
-Work in progress – bitte nur bewusst und mit Backup auf produktiven Nodes einsetzen.
+Work in progress – use carefully and always with backups on production nodes.

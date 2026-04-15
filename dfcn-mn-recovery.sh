@@ -224,60 +224,50 @@ prompt_addnodes_source() {
       2)
         ADDNODES=()
         print_line
-        echo "Enter trusted addnodes (format IP:PORT or HOSTNAME:PORT)."
-        echo "Enter an empty line to finish."
+        echo "Paste your trusted addnodes now (one IP:PORT or HOSTNAME:PORT per line)."
+        echo "Finish with an empty line or Ctrl+D."
         echo "You may enter more, but ideally not much more than ${MAX_RANDOM_CANDIDATES} addnodes."
         echo "Maximum manual input lines: 80."
         print_line
 
-        local first_non_empty_seen=0
-        local max_lines=80
-        local line_count=0
+        # Alles, was jetzt kommt, bis zur ersten leeren Zeile oder EOF in eine temp-Datei
+        tmp_input="$(mktemp)"
+        line_count=0
+        while IFS= read -r line; do
+          # leer -> Ende
+          [ -z "$(echo "$line" | xargs)" ] && break
 
-        while [ "$line_count" -lt "$max_lines" ]; do
-          local line
-          # wenn stdin zu ist oder EOF → raus
-          if ! read -r -p "addnode: " line; then
-            break
-          fi
+          line_count=$((line_count + 1))
+          [ "$line_count" -gt 80 ] && break
 
+          echo "$line" >> "$tmp_input"
+        done
+
+        # Jetzt KEINE weiteren reads mehr – Paste-Overflow kann nichts mehr anrichten
+
+        # Temp-Datei Zeile für Zeile parsen
+        while IFS= read -r line; do
           line="${line%%#*}"
           line="$(echo "$line" | xargs)"
+          [ -z "$line" ] && continue
 
-          # Mitgepastete leere Zeilen am Anfang ignorieren
-          if [ "$first_non_empty_seen" -eq 0 ] && [ -z "$line" ]; then
-            continue
-          fi
-
-          # Leere Zeile nach der ersten Adresse beendet die Eingabe
-          [ -z "$line" ] && break
-
-          first_non_empty_seen=1
-          line_count=$((line_count + 1))
-
-          # Führendes "addnode"/"addnode:" entfernen
+          # Führendes "addnode"/"addnode:" strippen
           line="$(echo "$line" | sed -E 's/^[[:space:]]*addnode[:[:space:]]+//I')"
           line="$(echo "$line" | awk '{print $1}')"
 
           # Nur HOST:PORT akzeptieren
-          if ! echo "$line" | grep -Eq '^[A-Za-z0-9._-]+:[0-9]+$'; then
-            continue
+          if echo "$line" | grep -Eq '^[A-Za-z0-9._-]+:[0-9]+$'; then
+            ADDNODES+=("$line")
           fi
+        done < "$tmp_input"
 
-          ADDNODES+=("$line")
-        done
-
-        if [ "$line_count" -ge "$max_lines" ]; then
-          warn "Maximum number of manual addnode input lines (${max_lines}) reached."
-        fi
-
-        # Input-Puffer aggressiv leeren, damit keine weiteren \"addnode:\"-Prompts befüttert werden
-        while read -t 0.01 -r _dummy; do :; done
+        rm -f "$tmp_input"
 
         if [ "${#ADDNODES[@]}" -eq 0 ]; then
           error "No addnodes were entered."
           exit 1
         fi
+
         return 0
         ;;
       *)

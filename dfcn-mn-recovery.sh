@@ -224,21 +224,22 @@ prompt_addnodes_source() {
       2)
         ADDNODES=()
         print_line
+        # erst hier lokale Variable setzen
+        local max_lines=50
+
         echo "Enter trusted addnodes (format IP:PORT or HOSTNAME:PORT)."
         echo "Paste multiple lines if you like."
         echo "After pasting, press ENTER once more on an empty line to finish."
         echo "You may enter more, but ideally not much more than ${MAX_RANDOM_CANDIDATES} addnodes."
-        echo "*** IMPORTANT: Maximum manual input lines (accepted): ${max_lines} ***"
+        echo "*** IMPORTANT: Maximum manual input lines: ${max_lines} ***"
         print_line
 
         local lines=()
-        local max_lines=50
         local seen_non_empty=0
 
         while [ "${#lines[@]}" -lt "$max_lines" ]; do
           local line
           if ! read -r line; then
-            # EOF → Ende
             break
           fi
 

@@ -1191,33 +1191,31 @@ interactive_monitoring_menu() {
 }
 
 show_sync_progress() {
-  local block_height sync_json chain_json
-  local asset_name is_blockchain_synced is_synced is_failed verification_progress
+  local block_height sync_json
+  local asset_name is_blockchain_synced is_synced is_failed is_failed_raw
 
   block_height="$(run_cli getblockcount 2>/dev/null || true)"
   sync_json="$(run_cli mnsync status 2>/dev/null || true)"
-  chain_json="$(run_cli getblockchaininfo 2>/dev/null || true)"
 
   asset_name="$(echo "$sync_json" | jq -r '.AssetName // "unknown"' 2>/dev/null)"
   is_blockchain_synced="$(echo "$sync_json" | jq -r '.IsBlockchainSynced // "unknown"' 2>/dev/null)"
   is_synced="$(echo "$sync_json" | jq -r '.IsSynced // "unknown"' 2>/dev/null)"
-  is_failed="$(echo "$sync_json" | jq -r '.IsFailed // "unknown"' 2>/dev/null)"
-  verification_progress="$(echo "$chain_json" | jq -r '.verificationprogress // empty' 2>/dev/null)"
+  is_failed_raw="$(echo "$sync_json" | jq -r '.IsFailed // empty' 2>/dev/null)"
+  if [[ "$is_failed_raw" == "true" ]]; then
+    is_failed="true"
+  else
+    is_failed="false"
+  fi
 
+  echo
   echo "Sync Progress"
   echo "-------------"
   echo "Local block height: ${block_height:-unknown}"
 
-  if [[ -n "$verification_progress" && "$verification_progress" != "null" ]]; then
-    awk -v v="$verification_progress" 'BEGIN { printf "Verification progress: %.2f%%\n", v * 100 }'
-  else
-    echo "Verification progress: unknown"
-  fi
-
   echo "Masternode sync stage: ${asset_name:-unknown}"
   echo "Blockchain synced: ${is_blockchain_synced:-unknown}"
   echo "Masternode synced: ${is_synced:-unknown}"
-  echo "Sync failed: ${is_failed:-unknown}"
+  echo "Sync failed: ${is_failed}"
   echo
 
   if [[ "$is_synced" == "true" && "$asset_name" == "MASTERNODE_SYNC_FINISHED" ]]; then

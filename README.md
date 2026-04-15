@@ -103,7 +103,7 @@ In this mode, no `addnode=` entries are created or modified.
 
 On top of mode 1:
 
-1. Load and validate `trusted_addnodes.txt`.
+1. In this mode you can either use a prefilled `trusted_addnodes.txt` file or enter trusted addnodes manually when prompted.
 2. Random candidate selection, port checks and peer checks using `addnode ... onetry` + `getpeerinfo`. 
 3. Show good vs. rejected addnodes.
 4. On confirmation: write a clearly separated helper block with verified addnodes into `defcon.conf`.

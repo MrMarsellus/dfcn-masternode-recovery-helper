@@ -513,7 +513,7 @@ show_pose_problem_nodes_preview() {
     echo " - ${ip}"
   done
 
-  echo
+  print_line
   echo "PoSe analysis summary (registered true, local IP excluded if detected):"
   echo " - Already PoSe-banned masternode IPs      : ${POSE_BANNED_COUNT}"
   echo " - PoSe-scored MN IPs (not banned yet)     : ${POSE_SCORED_NOT_BANNED_COUNT}"

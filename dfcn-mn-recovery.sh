@@ -510,7 +510,7 @@ cleanup_recovery_files() {
 
   echo "Planned cleanup targets:"
   echo " - ${DEFAULT_DATA_DIR}/peers.dat"
-  echo " - ${DEFAULT_DATA_DIR}/banlist.dat"
+  echo " - ${DEFAULT_DATA_DIR}/banlist.json (or banlist.dat)"
   echo " - ${DEFAULT_DATA_DIR}/mncache.dat"
   echo " - ${DEFAULT_DATA_DIR}/netfulfilled.dat"
   echo " - ${DEFAULT_DATA_DIR}/llmq"
@@ -526,7 +526,7 @@ cleanup_recovery_files() {
   fi
 
   rm -f "${DEFAULT_DATA_DIR}/peers.dat"
-  rm -f "${DEFAULT_DATA_DIR}/banlist.dat"
+  rm -f "${DEFAULT_DATA_DIR}/banlist.json" "${DEFAULT_DATA_DIR}/banlist.dat"
   rm -f "${DEFAULT_DATA_DIR}/mncache.dat"
   rm -f "${DEFAULT_DATA_DIR}/netfulfilled.dat"
   rm -rf "${DEFAULT_DATA_DIR}/llmq"

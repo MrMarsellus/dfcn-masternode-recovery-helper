@@ -226,6 +226,8 @@ prompt_addnodes_source() {
         print_line
         echo "Enter trusted addnodes (format IP:PORT or HOSTNAME:PORT)."
         echo "Enter an empty line to finish."
+        echo "Hint: Please do not enter much more than ${MAX_RANDOM_CANDIDATES} addnodes."
+        echo "Only up to ${MAX_RANDOM_CANDIDATES} random candidates will be tested."
         print_line
         while true; do
           local line

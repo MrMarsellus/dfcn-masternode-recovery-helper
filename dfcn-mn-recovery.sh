@@ -226,23 +226,29 @@ prompt_addnodes_source() {
         print_line
         echo "Enter trusted addnodes (format IP:PORT or HOSTNAME:PORT)."
         echo "Enter an empty line to finish."
-        echo "Hint: Please do not enter much more than ${MAX_RANDOM_CANDIDATES} addnodes."
-        echo "Only up to ${MAX_RANDOM_CANDIDATES} random candidates will be tested."
+        echo "You may enter more, but ideally not much more than ${MAX_RANDOM_CANDIDATES} addnodes."
         print_line
+
+        local first_non_empty_seen=0
         while true; do
           local line
           read -r -p "addnode: " line
-          # Kommentare weg
           line="${line%%#*}"
           line="$(echo "$line" | xargs)"
+
+          # Wenn noch keine Zeile erfasst wurde, leere Zeilen ignorieren
+          if [ "$first_non_empty_seen" -eq 0 ] && [ -z "$line" ]; then
+            continue
+          fi
+
           [ -z "$line" ] && break
-        
-          # Führendes "addnode" oder "addnode:" entfernen
-          line="$(echo "$line" | sed -E 's/^[[:space:]]*addnode[:[:space:]]+//i')"
-        
-          # Nur erstes Token nehmen (falls versehentlich mehr eingegeben wurde)
+
+          first_non_empty_seen=1
+
+          # Führendes "addnode"/"addnode:" strippen
+          line="$(echo "$line" | sed -E 's/^[[:space:]]*addnode[:[:space:]]+//I')"
           line="$(echo "$line" | awk '{print $1}')"
-        
+
           [ -z "$line" ] && continue
           ADDNODES+=("$line")
         done

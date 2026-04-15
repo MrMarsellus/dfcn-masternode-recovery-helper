@@ -1,35 +1,75 @@
 # DeFCoN Masternode Recovery Helper
 
-Cautious recovery helper for DeFCoN masternodes with optional trusted addnode support.
+Cautious recovery helper für DeFCoN-Masternodes mit optionalen trusted Addnodes und PoSe-basiertem temporären Ban-Feature.
 
 ## Features
 
-- Three guided modes:
-  - Recovery without trusted addnodes
-  - Recovery with trusted addnodes
-  - Restore normal mode for helper-managed addnode recovery
-- Loads a trusted addnode list from a separate file when Recovery with trusted addnodes is used
-- Randomized testing of trusted nodes and automatic filtering of good peers
-- Careful daemon stop and restart handling with additional stop verification
-- Optional temporary service disable or mask to prevent unwanted auto-restarts during recovery
-- Optional peer and cache cleanup (`peers.dat`, `mncache.dat`, `llmq`, `blocks`, `chainstate`, `indexes`, `evodb`)
-- Optional temporary trusted-peer mode by writing verified addnodes into `defcon.conf`
-- Interactive monitoring menu to track sync progress before continuing recovery
-- Guided controller wallet step for `protx update_service` after full sync
-- Restore normal mode to remove helper-managed addnode settings and return to normal configuration
-- Interactive safety check before restore normal mode (checks READY + full masternode sync)
-- Clear prompts, status messages, and confirmation steps to avoid accidental changes
+- Drei geführte Modi:
+  - Recovery ohne trusted addnodes
+  - Recovery mit trusted addnodes
+  - Restore normal mode (Addnode-Revert + optionale PoSe-Unbans)
+- Trusted-Addnodes:
+  - Laden aus `trusted_addnodes.txt`
+  - Randomisierte Kandidatenauswahl und Connectivity-Checks
+  - Schreiben geprüfter Addnodes in einen klar markierten Block in `defcon.conf`
+- Recovery-Sicherheit:
+  - Vorsichtiger Daemon-Stop (systemd + RPC + optional kill) mit Stop-Verifikation
+  - Optionales Deaktivieren/Maskieren des Services gegen Auto-Restarts
+  - Optionales Entfernen von Lockfile und Resync-Cleanup (`peers.dat`, `banlist.*`, `mncache.dat`, `llmq`, `blocks`, `chainstate`, `indexes`, `evodb`)
+- PoSe-Integration:
+  - Auswertung der deterministischen Masternodeliste via `protx list registered true` (inkl. PoSe-banned Nodes) 
+  - Erkennung problematischer MNs:
+    - PoSe-banned: `state.PoSeBanHeight > 0`
+    - PoSe-score: `state.PoSePenalty > 0`
+  - Ableitung der Service-IP aus `state.service` (IPv4) 
+  - Optionale Erstellung einer temporären PoSe-basierten Banliste, die nach Cleanup und Neustart per `setban` angewendet wird 
+  - Tracking-Datei `recovery_pose_bans.txt` mit Zuständen `prepared` und `applied` für sauberes Unban im Restore-Mode
+- Monitoring & Steuerung:
+  - Interaktives Monitoring-Menü (Blockhöhe, `mnsync status`, zusammengefasster Sync-Status, `debug.log`-Tail)
+  - Controller-Wallet-Hinweis mit `protx update_service`-Template nach vollem Sync 
+  - Interaktiver Safety-Check vor Restore (READY + vollständiger MN-Sync)
 
-## Files
+## Dateien
 
-- `dfcn-mn-recovery.sh` – main recovery script
-- `trusted_addnodes.txt` – trusted addnode list used only for **Recovery with trusted addnodes**
+- `dfcn-mn-recovery.sh` – Hauptscript
+- `trusted_addnodes.txt` – optionale trusted Addnode-Liste (nur für Mode 2)
+- `recovery_pose_bans.txt` – optionale, vom Script verwaltete PoSe-Banliste (nur wenn PoSe-Feature genutzt wird)
 
-## Usage
+## Installation & Start
 
-### Quick one-liner (advanced users only)
+**Empfohlen (manuell, prüfbar):**
 
-If you understand the security implications of downloading and executing remote scripts, you can run the helper in one step:
+```bash
+cd /root
+wget -O dfcn-mn-recovery.sh "https://raw.githubusercontent.com/MrMarsellus/dfcn-masternode-recovery-helper/main/dfcn-mn-recovery.sh"
+wget -O trusted_addnodes.txt "https://raw.githubusercontent.com/MrMarsellus/dfcn-masternode-recovery-helper/main/trusted_addnodes.txt"
+chmod +x /root/dfcn-mn-recovery.sh
+```
+
+Script prüfen (empfohlen):
+
+```bash
+nano /root/dfcn-mn-recovery.sh
+```
+
+Dann ausführen:
+
+```bash
+/root/dfcn-mn-recovery.sh
+```
+
+Beim Start zeigt das Script:
+
+- aktuelle Defaults (User, Datadir, Binaries, Service, Port)
+- Existenz der Binaries und der Config
+- Modus-Auswahl:
+  - `1` = Recovery ohne trusted addnodes
+  - `2` = Recovery mit trusted addnodes
+  - `3` = Restore normal mode
+
+> **Hinweis:** `trusted_addnodes.txt` ist nur für Mode 2 erforderlich.
+
+**Optionaler One-Liner (nur für erfahrene Nutzer, die den Code vorher geprüft haben):**
 
 ```bash
 cd /root && \
@@ -39,134 +79,82 @@ chmod +x /root/dfcn-mn-recovery.sh && \
 /root/dfcn-mn-recovery.sh
 ```
 
-> **Security notice:** Always review the script before running it on a production masternode.  
-> You can open `dfcn-mn-recovery.sh` in an editor (for example `nano /root/dfcn-mn-recovery.sh`) and verify its contents before execution.
+> **Security:** Lade das Script nur aus vertrauenswürdigen Quellen und lies es, bevor du es auf einem produktiven Masternode ausführst.
 
-During startup, the script will:
+## Mode 1 – Recovery ohne trusted addnodes
 
-- Show current defaults (user, data dir, binaries, service name, port)
-- Validate that binaries and the main config file exist
-- Ask you to choose a mode:
-  - `1` = Recovery (without trusted addnodes)
-  - `2` = Recovery with trusted addnodes
-  - `3` = Restore normal mode
+Ablauf (vereinfacht):
 
-> **Note:** `trusted_addnodes.txt` is only required for **Mode 2**.
+1. Lokalen Status und Servicestatus anzeigen.
+2. Backup von `defcon.conf` erstellen.
+3. Daemon/Service vorsichtig stoppen und stoppen verifizieren.
+4. Optional Lockfile entfernen.
+5. Optional lokale Chain-/Peer-/Cache-Daten löschen (erzwungener Resync).
+6. Daemon neu starten.
+7. Optional: PoSe-Feature
+   - Live-Auswertung `protx list registered true` und Anzeige problematischer MNs 
+   - bei Bestätigung: Schreiben von `recovery_pose_bans.txt` (State `prepared`), Anwendung der Bans nach Neustart mit `setban` (State `applied`) 
+8. Interaktives Monitoring-Menü bis vollständiger Sync.
+9. Hinweis für `protx update_service` im Controller-Wallet. 
 
-### Manual download and run (recommended)
+In diesem Modus werden keine `addnode=`-Einträge erstellt oder verändert.
 
-```bash
-cd /root && wget -O dfcn-mn-recovery.sh "https://raw.githubusercontent.com/MrMarsellus/dfcn-masternode-recovery-helper/main/dfcn-mn-recovery.sh" && wget -O trusted_addnodes.txt "https://raw.githubusercontent.com/MrMarsellus/dfcn-masternode-recovery-helper/main/trusted_addnodes.txt" && chmod +x /root/dfcn-mn-recovery.sh
-```
+## Mode 2 – Recovery mit trusted addnodes
 
-```bash
-/root/dfcn-mn-recovery.sh
-```
+Zusätzlich zu Mode 1:
 
-### Optional: review the script before running it
+1. Laden und Validieren von `trusted_addnodes.txt`.
+2. Randomisierte Kandidatenauswahl, Port-Check und Peer-Check per `addnode ... onetry` + `getpeerinfo`. 
+3. Anzeige guter vs. verworfener Addnodes.
+4. Bei Bestätigung: Schreiben eines klar abgegrenzten Helper-Blocks mit geprüften Addnodes in `defcon.conf`.
+5. Stop, Cleanup, Restart wie in Mode 1.
+6. Optional: PoSe-Feature wie oben (Vorbereiten → Anwenden nach Restart).
+7. Monitoring und Controller-Wallet-Schritt wie in Mode 1.
 
-```bash
-nano /root/dfcn-mn-recovery.sh
-```
+Dieser Modus ist für Nodes gedacht, die beim Wiederaufbau von einem kuratierten Peer-Set profitieren.
 
-```bash
-/root/dfcn-mn-recovery.sh
-```
+## Mode 3 – Restore normal mode
 
-## Recovery without trusted addnodes (Mode 1)
+Ziel: Helper-Einstellungen zurückbauen, wenn der Node wieder stabil läuft.
 
-When you select **Recovery (without trusted addnodes)**, the script will:
+1. Safety-Check:
+   - `masternode status` + `mnsync status` lesen.
+   - Automatisches Weiter, wenn:
+     - `state = READY`
+     - Stage `MASTERNODE_SYNC_FINISHED`
+     - `IsSynced = true` 
+   - Sonst Warnung + Auswahl:
+     - nochmal prüfen
+     - trotzdem fortfahren (nicht empfohlen)
+     - abbrechen
+2. Lokalen Status + Service anzeigen.
+3. Backup von `defcon.conf`.
+4. Vorsichtiger Stop + Stop-Verifikation.
+5. Optional Lockfile entfernen.
+6. PoSe-Unbans:
+   - Falls `recovery_pose_bans.txt` existiert, werden nur diese IPs per `setban "<ip>" remove` zurückgenommen. 
+   - Nicht (mehr) gebannte IPs werden nur informativ gemeldet.
+   - Datei kann anschließend gelöscht oder behalten werden.
+7. Entfernen des Helper-Addnode-Blocks aus `defcon.conf`.
+8. Neustart, finaler Status und optionales Wiederherstellen des ursprünglichen Service-States.
 
-1. Show the current local status and service state.
-2. Create a backup of `defcon.conf`.
-3. Carefully stop the daemon and service, including a verification step to confirm that the node is really stopped before destructive actions continue.
-4. Optionally remove the lock file.
-5. Optionally delete local blockchain, peer and cache data to force a clean resync.
-6. Start the daemon again.
-7. Open the interactive monitoring menu.
+## Monitoring-Menü (alle Modi)
 
-This mode does **not** load `trusted_addnodes.txt` and does **not** modify `addnode=` settings in `defcon.conf`.
+Befehle:
 
-## Recovery with trusted addnodes (Mode 2)
+- `g` – `getblockcount`
+- `s` – `mnsync status`
+- `p` – zusammengefasste Anzeige (Blockhöhe, Verificationprogress, Stage, Flags)
+- `l` – letzte 30 Zeilen aus `debug.log`
+- `x` – „Node ist fertig synchronisiert, weiter“
 
-When you select **Recovery with trusted addnodes**, the script will:
+Vor `x` sollte gelten:
 
-1. Load and validate trusted addnodes from `trusted_addnodes.txt`.
-2. Randomly select a subset of candidates and test connectivity and peer acceptance.
-3. Show good and rejected addnodes.
-4. Write the verified addnodes into `defcon.conf` in a helper-managed section (if you confirm).
-5. Show the current local status and service state.
-6. Create a backup of `defcon.conf`.
-7. Carefully stop the daemon and service, including a verification step to confirm that the node is really stopped before destructive actions continue.
-8. Optionally remove the lock file.
-9. Optionally delete local blockchain, peer and cache data to force a clean resync.
-10. Start the daemon again with the updated configuration.
-11. Open the interactive monitoring menu.
-
-This mode is intended for nodes that may benefit from a temporary curated peer set during recovery.
-
-## Interactive monitoring menu
-
-In the monitoring menu you can:
-
-- `g` – get block height
-- `s` – show raw `mnsync status`
-- `p` – show summarized sync progress (block height, sync stage, flags)
-- `l` – show the last 30 lines of `debug.log`
-- `x` – confirm that sync is complete and continue with the next step
-
-Before using `x`, the node should meet **all** of the following conditions:
-
-- Local block height matches the reference block height (explorer / trusted reference)
-- `Masternode sync stage` is `MASTERNODE_SYNC_FINISHED`
-- `Blockchain synced` is `true`
-- `Masternode synced` is `true`
-
-Once you continue with `x`, the script will:
-
-- Show a final local status snapshot
-- Display a controller-wallet hint with the `protx update_service` command template
-
-You must run the `protx update_service` command in your controller wallet and wait for the ProTx transaction to be confirmed before you expect the masternode to recover from a PoSe-banned state.
-
-## Restore normal mode (Mode 3)
-
-When you select **Restore normal mode**, the script will:
-
-1. Run an interactive safety check (`check_ready_for_restore`):
-   - Read `masternode status` and `mnsync status`
-   - Show current `state`, `status`, sync stage and `IsSynced` flag
-   - If the node is **READY**, has sync stage `MASTERNODE_SYNC_FINISHED` and `IsSynced` is `true`, it continues automatically
-   - Otherwise, it warns and lets you choose:
-     - `1` – check status again
-     - `2` – continue with restore normal mode anyway (not recommended)
-     - `3` – exit without making changes
-2. Show the current local status and service state.
-3. Create a backup of `defcon.conf`.
-4. Stop the daemon cautiously and verify that it is really stopped.
-5. Optionally remove the lock file.
-6. Remove the helper-managed trusted addnode section from `defcon.conf`.
-7. Start the daemon again with the normal configuration.
-8. Show a final local status snapshot.
-
-This mode is intended to revert changes made by **Recovery with trusted addnodes**.
-
-## Service handling notes
-
-During recovery or restore, the script may optionally:
-
-- stop the systemd service before attempting daemon shutdown
-- temporarily disable the service to prevent unwanted auto-restarts
-- optionally mask the service as a stronger fallback if the daemon refuses to stay stopped
-
-If the script changed the service state during the session, it will ask at the end whether it should restore the service state and start the service again.
-
-## End-of-run note
-
-At the end of a recovery run, the script will remind you:
-
-> Once your masternode has been stable for several days, run this script again and select **"Restore normal mode"** if you previously used **"Recovery with trusted addnodes"** and want to revert from helper-managed recovery settings.
+- Blockhöhe ≈ Referenz (Explorer/Referenznode)
+- Stage `MASTERNODE_SYNC_FINISHED`
+- `Blockchain synced` = `true`
+- `Masternode synced` = `true` 
 
 ## Status
 
-Work in progress.
+Work in progress – bitte nur bewusst und mit Backup auf produktiven Nodes einsetzen.

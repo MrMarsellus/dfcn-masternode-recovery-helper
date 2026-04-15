@@ -179,7 +179,7 @@ load_addnodes() {
 
 show_addnodes() {
   print_line
-  echo "Trusted addnodes loaded from file:"
+  echo "Trusted addnodes selected:"
   for node in "${ADDNODES[@]}"; do
     echo " - ${node}"
   done
@@ -203,6 +203,50 @@ validate_addnodes() {
   fi
 
   success "All trusted addnodes have a valid basic format."
+}
+
+prompt_addnodes_source() {
+  print_line
+  echo "Trusted addnodes source:"
+  echo "  1) Use existing list from ${DEFAULT_ADDNODE_FILE}"
+  echo "  2) Enter addnodes manually"
+  print_line
+
+  local choice
+  while true; do
+    read -r -p "Enter 1 or 2: " choice
+    case "${choice}" in
+      1)
+        check_addnode_file
+        load_addnodes
+        return 0
+        ;;
+      2)
+        ADDNODES=()
+        print_line
+        echo "Enter trusted addnodes (format IP:PORT or HOSTNAME:PORT)."
+        echo "Enter an empty line to finish."
+        print_line
+        while true; do
+          local line
+          read -r -p "addnode: " line
+          line="${line%%#*}"
+          line="$(echo "$line" | xargs)"
+          [ -z "$line" ] && break
+          ADDNODES+=("$line")
+        done
+
+        if [ "${#ADDNODES[@]}" -eq 0 ]; then
+          error "No addnodes were entered."
+          exit 1
+        fi
+        return 0
+        ;;
+      *)
+        warn "Invalid selection. Please enter 1 or 2."
+        ;;
+    esac
+  done
 }
 
 show_local_status() {
@@ -1369,8 +1413,7 @@ run_recovery_addnodes_mode() {
   echo "PoSe-based bans can optionally be prepared and will be applied after cleanup+restart."
   print_line
 
-  check_addnode_file
-  load_addnodes
+  prompt_addnodes_source
   show_addnodes
   validate_addnodes
   pick_random_candidates

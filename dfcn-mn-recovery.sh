@@ -2,7 +2,7 @@
 
 set -u
 
-SCRIPT_VERSION="0.3.0"
+SCRIPT_VERSION="0.4.3"
 
 DEFAULT_DEFCON_USER="defcon"
 DEFAULT_DEFCON_HOME="/home/defcon"
@@ -19,6 +19,12 @@ MANAGED_END="# END DFCN RECOVERY HELPER MANAGED ADDNODES"
 
 MAX_RANDOM_CANDIDATES=30
 MAX_GOOD_ADDNODES=20
+
+POSE_BANTIME=86400
+POSE_BANLIST_FILE="${DEFAULT_DATA_DIR}/recovery_pose_bans.txt"
+
+POSE_TRACK_STATE_PREPARED="prepared"
+POSE_TRACK_STATE_APPLIED="applied"
 
 SERVICE_WAS_DISABLED=0
 SERVICE_WAS_MASKED=0
@@ -57,6 +63,27 @@ run_cli() {
   "${DEFAULT_CLI}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" "$@"
 }
 
+run_cli_json() {
+  "${DEFAULT_CLI}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" "$@" 2>/dev/null
+}
+
+is_valid_ipv4() {
+  local ip="$1"
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+
+  local IFS=.
+  local octets
+  read -r -a octets <<< "$ip"
+
+  local octet
+  for octet in "${octets[@]}"; do
+    [[ "$octet" =~ ^[0-9]+$ ]] || return 1
+    [ "$octet" -ge 0 ] && [ "$octet" -le 255 ] || return 1
+  done
+
+  return 0
+}
+
 show_intro() {
   print_line
   echo "DeFCoN Masternode Recovery Helper v${SCRIPT_VERSION}"
@@ -65,11 +92,13 @@ show_intro() {
   echo "Available modes:"
   echo "  1) Recovery (without trusted addnodes)"
   echo "  2) Recovery with trusted addnodes"
-  echo "  3) Restore normal mode (remove helper-managed addnodes)"
+  echo "  3) Restore normal mode (remove helper-managed addnodes + PoSe-bans)"
   print_line
-  echo "This tool is designed to help recover a problematic masternode."
-  echo "It does NOT guarantee that a PoSe-banned node will recover."
-  echo "It will guide you carefully and ask before critical actions."
+  echo "Notes:"
+  echo " - PoSe evaluation uses 'protx list registered true' to include PoSe-banned nodes."
+  echo " - PoSe-banned = state.PoSeBanHeight > 0"
+  echo " - PoSe-scored = state.PoSePenalty > 0"
+  echo " - Service IP   = state.service (IPv4 only in this helper)."
   print_line
 }
 
@@ -84,6 +113,8 @@ show_defaults() {
   echo "Service name    : ${DEFAULT_SERVICE}"
   echo "Default port    : ${DEFAULT_PORT}"
   echo "Addnode file    : ${DEFAULT_ADDNODE_FILE}"
+  echo "PoSe bantime    : ${POSE_BANTIME} seconds"
+  echo "PoSe ban file   : ${POSE_BANLIST_FILE}"
   print_line
 }
 
@@ -134,7 +165,6 @@ load_addnodes() {
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%%#*}"
     line="$(echo "$line" | xargs)"
-
     if [ -n "$line" ]; then
       ADDNODES+=("$line")
     fi
@@ -221,7 +251,7 @@ check_service_and_process() {
     proc_line="$(pgrep -af "${DEFAULT_DAEMON}" | head -n1)"
     pid="${proc_line%% *}"
     cmd="${proc_line#* }"
-    bin="${cmd%% *}"  # nur Binary-Pfad
+    bin="${cmd%% *}"
 
     echo "Daemon process     : running"
     echo "Daemon PID         : ${pid}"
@@ -246,7 +276,7 @@ choose_mode() {
   echo "Choose mode:"
   echo "1. Recovery (without trusted addnodes)"
   echo "2. Recovery with trusted addnodes"
-  echo "3. Restore normal mode (remove helper-managed addnodes)"
+  echo "3. Restore normal mode (addnodes + PoSe-bans)"
   print_line
 
   read -r -p "Enter 1, 2 or 3: " SELECTED_MODE
@@ -264,7 +294,6 @@ choose_mode() {
 
 pick_random_candidates() {
   CANDIDATES=()
-
   mapfile -t CANDIDATES < <(printf '%s\n' "${ADDNODES[@]}" | shuf | head -n "${MAX_RANDOM_CANDIDATES}")
 
   if [ "${#CANDIDATES[@]}" -eq 0 ]; then
@@ -288,8 +317,7 @@ check_addnode_candidates() {
   BAD_ADDNODES=()
 
   for node in "${CANDIDATES[@]}"; do
-    local host
-    local port
+    local host port
     host="${node%:*}"
     port="${node##*:}"
 
@@ -341,6 +369,355 @@ check_addnode_candidates() {
   fi
 
   success "Trusted addnode candidate checks completed."
+}
+
+collect_pose_problem_nodes() {
+  print_line
+  info "Evaluating live deterministic masternode state for PoSe issues (registered true)..."
+
+  local protx_json
+  protx_json="$(run_cli_json protx list registered true)"
+  if [ -z "${protx_json}" ]; then
+    error "Failed to read deterministic masternode list via 'protx list registered true'."
+    return 1
+  fi
+
+  POSE_BANNED_IPS=()
+  POSE_SCORED_IPS=()
+  ALL_POSE_IPS=()
+
+  local tmp_banned tmp_scored tmp_all
+  tmp_banned="$(mktemp)"
+  tmp_scored="$(mktemp)"
+  tmp_all="$(mktemp)"
+
+  while IFS= read -r line; do
+    local service pose_penalty pose_ban_height ip
+    service="$(echo "$line" | jq -r '.state.service // empty' 2>/dev/null)"
+    pose_penalty="$(echo "$line" | jq -r '.state.PoSePenalty // empty' 2>/dev/null)"
+    pose_ban_height="$(echo "$line" | jq -r '.state.PoSeBanHeight // empty' 2>/dev/null)"
+
+    if [ -z "${service}" ] || [ "${service}" = "null" ]; then
+      continue
+    fi
+
+    ip="${service%:*}"
+    if ! is_valid_ipv4 "${ip}" ]; then
+      continue
+    fi
+
+    if [[ "${pose_ban_height}" =~ ^-?[0-9]+$ ]] && [ "${pose_ban_height}" -gt 0 ]; then
+      echo "${ip}" >> "${tmp_banned}"
+      echo "${ip}" >> "${tmp_all}"
+    fi
+
+    if [[ "${pose_penalty}" =~ ^-?[0-9]+$ ]] && [ "${pose_penalty}" -gt 0 ]; then
+      echo "${ip}" >> "${tmp_scored}"
+      echo "${ip}" >> "${tmp_all}"
+    fi
+  done < <(echo "${protx_json}" | jq -c '.[]')
+
+  if [ -s "${tmp_banned}" ]; then
+    mapfile -t POSE_BANNED_IPS < <(sort -u "${tmp_banned}")
+  else
+    POSE_BANNED_IPS=()
+  fi
+
+  if [ -s "${tmp_scored}" ]; then
+    mapfile -t POSE_SCORED_IPS < <(sort -u "${tmp_scored}")
+  else
+    POSE_SCORED_IPS=()
+  fi
+
+  if [ -s "${tmp_all}" ]; then
+    mapfile -t ALL_POSE_IPS < <(sort -u "${tmp_all}")
+  else
+    ALL_POSE_IPS=()
+  fi
+
+  rm -f "${tmp_banned}" "${tmp_scored}" "${tmp_all}"
+
+  POSE_BANNED_COUNT=${#POSE_BANNED_IPS[@]}
+  POSE_SCORED_COUNT=${#POSE_SCORED_IPS[@]}
+  ALL_POSE_COUNT=${#ALL_POSE_IPS[@]}
+
+  print_line
+  echo "PoSe analysis summary (registered true):"
+  echo " - Unique PoSe-banned masternode IPs   : ${POSE_BANNED_COUNT}"
+  echo " - Unique masternode IPs with score > 0: ${POSE_SCORED_COUNT}"
+  echo " - Total unique service IPs collected  : ${ALL_POSE_COUNT}"
+  print_line
+
+  if [ "${ALL_POSE_COUNT}" -eq 0 ]; then
+    warn "No problematic masternodes were found in 'registered true' list."
+    return 1
+  fi
+
+  return 0
+}
+
+show_pose_problem_nodes_preview() {
+  print_line
+  echo "Prepared problematic masternode service IPs (from registered true):"
+  for ip in "${ALL_POSE_IPS[@]}"; do
+    echo " - ${ip}"
+  done
+  print_line
+}
+
+write_pose_banlist_file() {
+  local state="$1"
+  local tmp_file
+  tmp_file="${POSE_BANLIST_FILE}.tmp"
+
+  {
+    echo "# DeFCoN Recovery Helper PoSe banlist"
+    echo "# Created: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+    echo "# Bantime: ${POSE_BANTIME}"
+    echo "# State: ${state}"
+    echo "# Source: protx list registered true"
+    echo "# IP format: IPv4 only, one per line"
+    printf '%s\n' "${ALL_POSE_IPS[@]}"
+  } > "${tmp_file}"
+
+  mv "${tmp_file}" "${POSE_BANLIST_FILE}"
+  chmod 600 "${POSE_BANLIST_FILE}" >/dev/null 2>&1 || true
+}
+
+save_pose_banlist_file_prepared() {
+  write_pose_banlist_file "${POSE_TRACK_STATE_PREPARED}"
+  success "Temporary PoSe banlist file written (state=prepared): ${POSE_BANLIST_FILE}"
+}
+
+update_pose_banlist_state_to_applied() {
+  if [ ! -f "${POSE_BANLIST_FILE}" ]; then
+    return
+  fi
+
+  local tmp_file new_state
+  tmp_file="${POSE_BANLIST_FILE}.tmp"
+  new_state="${POSE_TRACK_STATE_APPLIED}"
+
+  awk -v new_state="${new_state}" '
+    BEGIN { updated=0; }
+    /^# State:/ {
+      print "# State: " new_state;
+      updated=1;
+      next;
+    }
+    { print }
+    END {
+      if (!updated) {
+        print "# State: " new_state;
+      }
+    }
+  ' "${POSE_BANLIST_FILE}" > "${tmp_file}"
+
+  mv "${tmp_file}" "${POSE_BANLIST_FILE}"
+  chmod 600 "${POSE_BANLIST_FILE}" >/dev/null 2>&1 || true
+}
+
+read_pose_banlist_state() {
+  if [ ! -f "${POSE_BANLIST_FILE}" ]; then
+    echo ""
+    return
+  fi
+  local state_line
+  state_line="$(grep '^# State:' "${POSE_BANLIST_FILE}" 2>/dev/null || true)"
+  if [ -z "${state_line}" ]; then
+    echo ""
+    return
+  fi
+  echo "${state_line#*State: }" | xargs
+}
+
+collect_ips_from_pose_file() {
+  local file="$1"
+  local -n out_array="$2"
+
+  out_array=()
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"
+    line="$(echo "$line" | xargs)"
+    if [ -n "${line}" ] && is_valid_ipv4 "${line}"; then
+      out_array+=("${line}")
+    fi
+  done < "${file}"
+}
+
+prepare_pose_banlist() {
+  if [ "${ALL_POSE_COUNT:-0}" -eq 0 ]; then
+    warn "No PoSe-based IPs are available for a temporary banlist."
+    return 0
+  fi
+
+  show_pose_problem_nodes_preview
+
+  echo "This temporary PoSe-based banlist is intended to prevent problematic peers"
+  echo "from re-entering later through normal peer discovery during the next sync."
+  print_line
+
+  if ! ask_yes_no "Do you want to create the temporary PoSe-based banlist file with all collected IPs?"; then
+    warn "PoSe-based banlist file creation skipped by user."
+    return 0
+  fi
+
+  save_pose_banlist_file_prepared
+}
+
+apply_prepared_pose_bans() {
+  print_line
+  info "Checking whether a prepared PoSe banlist should now be applied..."
+
+  if [ ! -f "${POSE_BANLIST_FILE}" ]; then
+    info "No prepared PoSe banlist file found."
+    return 0
+  fi
+
+  local current_state
+  current_state="$(read_pose_banlist_state)"
+  if [ -z "${current_state}" ]; then
+    warn "PoSe banlist file has no state header; treating as prepared."
+    current_state="${POSE_TRACK_STATE_PREPARED}"
+  fi
+
+  if [ "${current_state}" = "${POSE_TRACK_STATE_APPLIED}" ]; then
+    info "PoSe banlist file is already marked as applied. Skipping automatic re-apply."
+    return 0
+  fi
+
+  PREPARED_POSE_IPS=()
+  collect_ips_from_pose_file "${POSE_BANLIST_FILE}" PREPARED_POSE_IPS
+
+  if [ "${#PREPARED_POSE_IPS[@]}" -eq 0 ]; then
+    warn "Prepared PoSe banlist file exists but contains no valid IPs."
+    return 0
+  fi
+
+  print_line
+  echo "Prepared PoSe bans ready to apply after restart: ${#PREPARED_POSE_IPS[@]}"
+  print_line
+
+  local applied=0
+  local failed=0
+
+  for ip in "${PREPARED_POSE_IPS[@]}"; do
+    if run_cli setban "${ip}" add "${POSE_BANTIME}" false >/dev/null 2>&1; then
+      applied=$((applied + 1))
+    else
+      failed=$((failed + 1))
+      warn "Could not ban IP (setban add failed): ${ip}"
+    fi
+  done
+
+  print_line
+  echo "Temporary PoSe ban application summary:"
+  echo " - Successfully banned: ${applied}"
+  echo " - Failed to ban      : ${failed}"
+  print_line
+
+  if [ "${applied}" -gt 0 ]; then
+    success "Temporary PoSe-based bans were applied after restart."
+    update_pose_banlist_state_to_applied
+  else
+    warn "No PoSe-based bans were applied after restart."
+  fi
+}
+
+remove_tracked_pose_bans() {
+  print_line
+  info "Checking for recovery-helper temporary PoSe bans..."
+
+  if [ ! -f "${POSE_BANLIST_FILE}" ]; then
+    info "No recovery-helper PoSe banlist file found."
+    return 0
+  fi
+
+  local current_state
+  current_state="$(read_pose_banlist_state)"
+  if [ -z "${current_state}" ]; then
+    current_state="(unknown)"
+  fi
+
+  TRACKED_POSE_IPS=()
+  collect_ips_from_pose_file "${POSE_BANLIST_FILE}" TRACKED_POSE_IPS
+
+  if [ "${#TRACKED_POSE_IPS[@]}" -eq 0 ]; then
+    warn "PoSe banlist file exists but contains no valid tracked IPs."
+    if ask_yes_no "Do you want to remove the empty or invalid PoSe banlist file now?"; then
+      rm -f "${POSE_BANLIST_FILE}"
+      success "PoSe banlist file removed."
+    fi
+    return 0
+  fi
+
+  print_line
+  echo "Tracked temporary PoSe bans found: ${#TRACKED_POSE_IPS[@]}"
+  echo "File state: ${current_state}"
+  echo "Tracked IPs:"
+  for ip in "${TRACKED_POSE_IPS[@]}"; do
+    echo " - ${ip}"
+  done
+  print_line
+
+  if ! ask_yes_no "Do you want to remove these recovery-helper PoSe bans now?"; then
+    warn "Removal of tracked PoSe bans skipped by user."
+    return 0
+  fi
+
+  local removed=0
+  local missing=0
+  local failed=0
+
+  for ip in "${TRACKED_POSE_IPS[@]}"; do
+    if run_cli setban "${ip}" remove >/dev/null 2>&1; then
+      removed=$((removed + 1))
+    else
+      # could be "not currently banned"
+      missing=$((missing + 1))
+      warn "Ban for IP not found or already expired: ${ip}"
+    fi
+  done
+
+  print_line
+  echo "Tracked PoSe ban removal summary:"
+  echo " - Successfully removed: ${removed}"
+  echo " - Not currently banned : ${missing}"
+  echo " - Other failures       : ${failed}"
+  print_line
+
+  if ask_yes_no "Do you want to delete the recovery-helper PoSe banlist file now?"; then
+    rm -f "${POSE_BANLIST_FILE}"
+    success "Recovery-helper PoSe banlist file removed."
+  else
+    warn "PoSe banlist file was kept."
+  fi
+}
+
+offer_pose_banlist_preparation() {
+  print_line
+  echo "Optional PoSe-based temporary banlist feature (registered true)"
+  echo "This can collect all currently problematic masternodes from the live"
+  echo "deterministic masternode state and prepare their service IPs for a"
+  echo "temporary banlist that will be applied AFTER cleanup and restart."
+  echo
+  echo "Problematic means:"
+  echo " - all currently PoSe-banned masternodes (PoSeBanHeight > 0)"
+  echo " - all masternodes with current PoSe score / PoSePenalty > 0"
+  echo "Source RPC: protx list registered true"
+  print_line
+
+  if ! ask_yes_no "Do you want to evaluate the current deterministic masternode state for a temporary PoSe-based banlist now?"; then
+    warn "PoSe-based temporary banlist evaluation skipped by user."
+    return 0
+  fi
+
+  if collect_pose_problem_nodes; then
+    prepare_pose_banlist
+  else
+    warn "No PoSe-based temporary banlist was prepared."
+  fi
 }
 
 verify_daemon_stopped() {
@@ -591,100 +968,100 @@ restore_normal_mode_conf() {
 
 restore_service_if_needed() {
   if [[ "${SERVICE_WAS_MASKED}" -eq 0 && "${SERVICE_WAS_DISABLED}" -eq 0 ]]; then
-      return 0
-  fi
-  
-  print_line
-  info "Recovery helper changed the service state earlier."
-  
-  if [[ "${SERVICE_WAS_MASKED}" -eq 1 ]]; then
-      echo " - Service was temporarily masked"
-  fi
-  
-  if [[ "${SERVICE_WAS_DISABLED}" -eq 1 ]]; then
-      echo " - Service was temporarily disabled"
-  fi
-  
-  print_line
-  
-  if ! ask_yes_no "Do you want to restore the service state now and start the service?"; then
-      warn "Service restore skipped by user."
-      warn "If needed, restore it manually later with systemctl unmask/enable/start."
-      return 0
-  fi
-  
-  if [[ "${SERVICE_WAS_MASKED}" -eq 1 ]]; then
-      info "Trying systemctl unmask ${DEFAULT_SERVICE}..."
-      if ! systemctl unmask "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
-          error "systemctl unmask did not succeed."
-      else
-          success "Service unmasked."
-      fi
-      sleep 2
-  fi
-  
-  if [[ "${SERVICE_WAS_DISABLED}" -eq 1 ]]; then
-      info "Trying systemctl enable ${DEFAULT_SERVICE}..."
-      if ! systemctl enable "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
-          error "systemctl enable did not succeed."
-      else
-          success "Service enabled."
-      fi
-      sleep 2
-  fi
-  
-  info "Trying systemctl start ${DEFAULT_SERVICE}..."
-  if ! systemctl start "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
-      error "systemctl start did not succeed."
-      echo "Check with: systemctl status ${DEFAULT_SERVICE}"
-      echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
-      sleep 2
-  else
-      sleep 5
-      if systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
-          success "Daemon appears to be running after service restore."
-      else
-          warn "Daemon does not appear to be running after service restore."
-          echo "Check with: systemctl status ${DEFAULT_SERVICE}"
-          echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
-      fi
+    return 0
   fi
 
-check_service_and_process
+  print_line
+  info "Recovery helper changed the service state earlier."
+
+  if [[ "${SERVICE_WAS_MASKED}" -eq 1 ]]; then
+    echo " - Service was temporarily masked"
+  fi
+
+  if [[ "${SERVICE_WAS_DISABLED}" -eq 1 ]]; then
+    echo " - Service was temporarily disabled"
+  fi
+
+  print_line
+
+  if ! ask_yes_no "Do you want to restore the service state now and start the service?"; then
+    warn "Service restore skipped by user."
+    warn "If needed, restore it manually later with systemctl unmask/enable/start."
+    return 0
+  fi
+
+  if [[ "${SERVICE_WAS_MASKED}" -eq 1 ]]; then
+    info "Trying systemctl unmask ${DEFAULT_SERVICE}..."
+    if ! systemctl unmask "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+      error "systemctl unmask did not succeed."
+    else
+      success "Service unmasked."
+    fi
+    sleep 2
+  fi
+
+  if [[ "${SERVICE_WAS_DISABLED}" -eq 1 ]]; then
+    info "Trying systemctl enable ${DEFAULT_SERVICE}..."
+    if ! systemctl enable "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+      error "systemctl enable did not succeed."
+    else
+      success "Service enabled."
+    fi
+    sleep 2
+  fi
+
+  info "Trying systemctl start ${DEFAULT_SERVICE}..."
+  if ! systemctl start "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+    error "systemctl start did not succeed."
+    echo "Check with: systemctl status ${DEFAULT_SERVICE}"
+    echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
+    sleep 2
+  else
+    sleep 5
+    if systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
+      success "Daemon appears to be running after service restore."
+    else
+      warn "Daemon does not appear to be running after service restore."
+      echo "Check with: systemctl status ${DEFAULT_SERVICE}"
+      echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
+    fi
+  fi
+
+  check_service_and_process
 }
 
 start_daemon_cautious() {
-print_line
-warn "The script can now try to start the daemon again."
+  print_line
+  warn "The script can now try to start the daemon again."
 
-if ! ask_yes_no "Do you want to start the daemon now?"; then
+  if ! ask_yes_no "Do you want to start the daemon now?"; then
     warn "Start step skipped by user."
     return 0
-fi
+  fi
 
-info "Ensuring no manual ${DEFAULT_DAEMON} processes are running..."
-pkill -f "${DEFAULT_DAEMON}" >/dev/null 2>&1 || true
-sleep 2
+  info "Ensuring no manual ${DEFAULT_DAEMON} processes are running..."
+  pkill -f "${DEFAULT_DAEMON}" >/dev/null 2>&1 || true
+  sleep 2
 
-info "Trying systemctl start ${DEFAULT_SERVICE}..."
-if ! systemctl start "${DEFAULT_SERVICE}"; then
+  info "Trying systemctl start ${DEFAULT_SERVICE}..."
+  if ! systemctl start "${DEFAULT_SERVICE}"; then
     error "systemctl start did not succeed."
     echo "Check with: systemctl status ${DEFAULT_SERVICE}"
     echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
     return 1
-fi
+  fi
 
-sleep 5
+  sleep 5
 
-if systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
+  if systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
     success "Daemon appears to be running via systemd."
     return 0
-else
+  else
     error "Daemon does not appear to be running after systemd start."
     echo "Check with: systemctl status ${DEFAULT_SERVICE}"
     echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
     return 1
-fi
+  fi
 }
 
 show_protx_placeholder() {
@@ -758,14 +1135,8 @@ interactive_monitoring_menu() {
 }
 
 show_sync_progress() {
-  local block_height
-  local sync_json
-  local chain_json
-  local asset_name
-  local is_blockchain_synced
-  local is_synced
-  local is_failed
-  local verification_progress
+  local block_height sync_json chain_json
+  local asset_name is_blockchain_synced is_synced is_failed verification_progress
 
   block_height="$(run_cli getblockcount 2>/dev/null || true)"
   sync_json="$(run_cli mnsync status 2>/dev/null || true)"
@@ -804,12 +1175,13 @@ run_recovery_plain_mode() {
   info "Selected: Recovery (without trusted addnodes)."
   print_line
   echo "This mode performs a cautious recovery WITHOUT changing addnode= settings."
-  echo "Use this for nodes that need a resync or reindex but do not rely on a helper-managed trusted addnode list."
+  echo "PoSe-based bans can optionally be prepared and will be applied after cleanup+restart."
   print_line
 
   show_local_status
   check_service_and_process
   backup_conf
+  offer_pose_banlist_preparation
   stop_daemon_cautious || exit 1
 
   if ! verify_daemon_stopped; then
@@ -821,6 +1193,7 @@ run_recovery_plain_mode() {
   remove_lock_file
   cleanup_recovery_files
   start_daemon_cautious || exit 1
+  apply_prepared_pose_bans
   interactive_monitoring_menu
   info "Showing final local status snapshot..."
   show_local_status
@@ -832,7 +1205,7 @@ run_recovery_addnodes_mode() {
   info "Selected: Recovery with trusted addnodes."
   print_line
   echo "This mode performs a cautious recovery AND manages a helper-controlled trusted addnode list in defcon.conf."
-  echo "Use this if you want to guide a problematic node via a curated set of trusted peers."
+  echo "PoSe-based bans can optionally be prepared and will be applied after cleanup+restart."
   print_line
 
   check_addnode_file
@@ -844,6 +1217,7 @@ run_recovery_addnodes_mode() {
   show_local_status
   check_service_and_process
   backup_conf
+  offer_pose_banlist_preparation
   stop_daemon_cautious || exit 1
 
   if ! verify_daemon_stopped; then
@@ -856,6 +1230,7 @@ run_recovery_addnodes_mode() {
   cleanup_recovery_files
   write_trusted_addnodes_to_conf
   start_daemon_cautious || exit 1
+  apply_prepared_pose_bans
   interactive_monitoring_menu
   info "Showing final local status snapshot..."
   show_local_status
@@ -868,12 +1243,7 @@ check_ready_for_restore() {
     print_line
     info "Checking if masternode is ready for restore normal mode..."
 
-    local mn_json
-    local mn_state
-    local mn_status
-    local sync_json
-    local asset_name
-    local is_synced
+    local mn_json mn_state mn_status sync_json asset_name is_synced
 
     mn_json="$(run_cli masternode status 2>/dev/null || echo "")"
     sync_json="$(run_cli mnsync status 2>/dev/null || echo "")"
@@ -929,10 +1299,10 @@ check_ready_for_restore() {
 }
 
 run_restore_mode() {
-  info "Selected: Restore normal mode (remove helper-managed addnodes)."
+  info "Selected: Restore normal mode (remove helper-managed addnodes + PoSe-bans)."
   print_line
-  echo "This mode is intended to revert changes made by 'Recovery with trusted addnodes'."
-  echo "It will remove the helper-managed addnode section and return defcon.conf to normal mode."
+  echo "This mode is intended to revert changes made by 'Recovery with trusted addnodes'"
+  echo "and to remove temporary PoSe bans created by this helper."
   print_line
 
   check_ready_for_restore
@@ -948,6 +1318,7 @@ run_restore_mode() {
   fi
 
   remove_lock_file
+  remove_tracked_pose_bans
   restore_normal_mode_conf
   start_daemon_cautious || exit 1
   info "Showing final local status snapshot..."
@@ -984,10 +1355,10 @@ main() {
   echo "Please continue monitoring the node carefully."
 
   if [[ "${MODE}" == "recovery_addnodes" ]]; then
-  print_line
-  print_line
-  echo "[Note] Once your masternode has been stable for several days, run this script again and select"
-  echo "'Restore normal mode' to revert from helper-managed trusted addnodes."
+    print_line
+    print_line
+    echo "[Note] Once your masternode has been stable for several days, run this script again and select"
+    echo "'Restore normal mode' to revert from helper-managed trusted addnodes and remove temporary PoSe bans."
   fi
 
   print_line

@@ -263,6 +263,113 @@ check_service_and_process() {
   print_line
 }
 
+ensure_daemon_running() {
+  print_line
+  info "Checking whether the daemon is already running..."
+
+  local rpc_ok=1
+  local service_active=1
+  local proc_ok=1
+  local service_exists=1
+
+  if timeout 5 "${DEFAULT_CLI}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" getblockcount >/dev/null 2>&1; then
+    rpc_ok=0
+  fi
+
+  if systemctl list-unit-files | grep -q "^${DEFAULT_SERVICE}\.service"; then
+    service_exists=0
+    if systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
+      service_active=0
+    fi
+  fi
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    proc_ok=0
+  fi
+
+  if [ "${rpc_ok}" -eq 0 ]; then
+    success "Daemon is already running and RPC is responding."
+    check_service_and_process
+    return 0
+  fi
+
+  print_line
+  echo "Startup check summary:"
+  echo " - Service file found : $([[ ${service_exists} -eq 0 ]] && echo yes || echo no)"
+  echo " - Service active     : $([[ ${service_active} -eq 0 ]] && echo yes || echo no)"
+  echo " - Daemon process     : $([[ ${proc_ok} -eq 0 ]] && echo yes || echo no)"
+  echo " - RPC responding     : no"
+  print_line
+
+  if [ "${service_exists}" -eq 0 ] && { [ "${service_active}" -eq 0 ] || [ "${proc_ok}" -eq 0 ]; }; then
+    warn "A service or daemon process was detected, but RPC is not responding."
+    echo "This may mean the daemon is starting, stuck, or unhealthy."
+    echo "Check with: systemctl status ${DEFAULT_SERVICE}"
+    echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
+    print_line
+
+    if ask_yes_no "Do you want to try restarting the service now?"; then
+      info "Trying systemctl restart ${DEFAULT_SERVICE}..."
+      if ! systemctl restart "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+        error "systemctl restart did not succeed."
+        echo "Check with: systemctl status ${DEFAULT_SERVICE}"
+        echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
+        return 1
+      fi
+
+      sleep 5
+
+      if timeout 5 "${DEFAULT_CLI}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" getblockcount >/dev/null 2>&1; then
+        success "Daemon appears to be running after restart."
+        check_service_and_process
+        return 0
+      fi
+
+      error "RPC is still not responding after restart."
+      echo "Check with: systemctl status ${DEFAULT_SERVICE}"
+      echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
+      return 1
+    fi
+
+    warn "User chose not to restart the daemon."
+    return 1
+  fi
+
+  warn "Daemon is not running."
+
+  if [ "${service_exists}" -ne 0 ]; then
+    error "Service file ${DEFAULT_SERVICE}.service was not found."
+    echo "Automatic start via systemctl is not possible."
+    return 1
+  fi
+
+  if ask_yes_no "Do you want to start the daemon now?"; then
+    info "Trying systemctl start ${DEFAULT_SERVICE}..."
+    if ! systemctl start "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+      error "systemctl start did not succeed."
+      echo "Check with: systemctl status ${DEFAULT_SERVICE}"
+      echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
+      return 1
+    fi
+
+    sleep 5
+
+    if timeout 5 "${DEFAULT_CLI}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" getblockcount >/dev/null 2>&1; then
+      success "Daemon appears to be running after start."
+      check_service_and_process
+      return 0
+    fi
+
+    error "Service was started, but RPC is still not responding."
+    echo "Check with: systemctl status ${DEFAULT_SERVICE}"
+    echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
+    return 1
+  fi
+
+  warn "User chose not to start the daemon."
+  return 1
+}
+
 backup_conf() {
   local backup_file
   backup_file="${DEFAULT_CONF_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
@@ -1386,6 +1493,7 @@ main() {
   show_defaults
   check_conf_file
   check_binaries
+  ensure_daemon_running
   choose_mode
 
   case "${MODE}" in

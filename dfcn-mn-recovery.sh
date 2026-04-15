@@ -228,14 +228,13 @@ prompt_addnodes_source() {
         echo "Paste multiple lines if you like."
         echo "After pasting, press ENTER once more on an empty line to finish."
         echo "You may enter more, but ideally not much more than ${MAX_RANDOM_CANDIDATES} addnodes."
-        echo "Maximum manual input lines: 80."
+        echo "*** IMPORTANT: Maximum manual input lines (accepted): ${max_lines} ***"
         print_line
 
         local lines=()
-        local max_lines=80
+        local max_lines=50
         local seen_non_empty=0
 
-        # Blockeingabe: sammle Zeilen, bis (a) leere Zeile nach Inhalt oder (b) 80 Zeilen erreicht
         while [ "${#lines[@]}" -lt "$max_lines" ]; do
           local line
           if ! read -r line; then
@@ -243,16 +242,13 @@ prompt_addnodes_source() {
             break
           fi
 
-          # Kommentare entfernen, trimmen
           line="${line%%#*}"
           line="$(echo "$line" | xargs)"
 
-          # Vor dem ersten Inhalt: leere Zeilen ignorieren (auch mitgepastete)
           if [ "$seen_non_empty" -eq 0 ] && [ -z "$line" ]; then
             continue
           fi
 
-          # Nach erstem Inhalt: eine komplett leere Zeile beendet den Block
           if [ "$seen_non_empty" -eq 1 ] && [ -z "$line" ]; then
             break
           fi
@@ -267,16 +263,12 @@ prompt_addnodes_source() {
           warn "Maximum number of manual input lines (${max_lines}) reached."
         fi
 
-        # Jetzt offline parsen
         for raw in "${lines[@]}"; do
           local line="$raw"
 
-          # Führendes "addnode"/"addnode:" entfernen
           line="$(echo "$line" | sed -E 's/^[[:space:]]*addnode[:[:space:]]+//I')"
-          # Nur erstes Token behalten
           line="$(echo "$line" | awk '{print $1}')"
 
-          # Nur HOST:PORT akzeptieren
           if echo "$line" | grep -Eq '^[A-Za-z0-9._-]+:[0-9]+$'; then
             ADDNODES+=("$line")
           fi

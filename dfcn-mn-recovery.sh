@@ -233,10 +233,10 @@ prompt_addnodes_source() {
         while true; do
           local line
           read -r -p "addnode: " line
+
           line="${line%%#*}"
           line="$(echo "$line" | xargs)"
 
-          # Wenn noch keine Zeile erfasst wurde, leere Zeilen ignorieren
           if [ "$first_non_empty_seen" -eq 0 ] && [ -z "$line" ]; then
             continue
           fi
@@ -245,13 +245,18 @@ prompt_addnodes_source() {
 
           first_non_empty_seen=1
 
-          # Führendes "addnode"/"addnode:" strippen
           line="$(echo "$line" | sed -E 's/^[[:space:]]*addnode[:[:space:]]+//I')"
           line="$(echo "$line" | awk '{print $1}')"
 
-          [ -z "$line" ] && continue
+          if ! echo "$line" | grep -Eq '^[A-Za-z0-9._-]+:[0-9]+$'; then
+            continue
+          fi
+
           ADDNODES+=("$line")
         done
+
+        # Rest-Puffer leeren, damit keine "addnode: addnode: ..." mehr nachlaufen
+        while read -t 0.01 -r _dummy; do :; done
 
         if [ "${#ADDNODES[@]}" -eq 0 ]; then
           error "No addnodes were entered."

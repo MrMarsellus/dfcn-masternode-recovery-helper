@@ -37,7 +37,19 @@ Cautious recovery helper for DeFCoN masternodes with optional trusted addnodes a
 
 ## Installation & Start
 
-**Recommended (manual, reviewable):**
+**Recommended one-liner (only for experienced users who review the code first):**
+
+```bash
+cd /root && \
+wget -O dfcn-mn-recovery.sh "https://raw.githubusercontent.com/MrMarsellus/dfcn-masternode-recovery-helper/main/dfcn-mn-recovery.sh" && \
+wget -O trusted_addnodes.txt "https://raw.githubusercontent.com/MrMarsellus/dfcn-masternode-recovery-helper/main/trusted_addnodes.txt" && \
+chmod +x /root/dfcn-mn-recovery.sh && \
+/root/dfcn-mn-recovery.sh
+```
+
+> **Security:** Only download the script from trusted sources and read it before running it on a production masternode.
+
+**Optional (manual, reviewable):**
 
 ```bash
 cd /root
@@ -68,18 +80,6 @@ On startup, the script will:
   - `3` = Restore normal mode
 
 > **Note:** `trusted_addnodes.txt` is only required for mode 2.
-
-**Optional one-liner (only for experienced users who review the code first):**
-
-```bash
-cd /root && \
-wget -O dfcn-mn-recovery.sh "https://raw.githubusercontent.com/MrMarsellus/dfcn-masternode-recovery-helper/main/dfcn-mn-recovery.sh" && \
-wget -O trusted_addnodes.txt "https://raw.githubusercontent.com/MrMarsellus/dfcn-masternode-recovery-helper/main/trusted_addnodes.txt" && \
-chmod +x /root/dfcn-mn-recovery.sh && \
-/root/dfcn-mn-recovery.sh
-```
-
-> **Security:** Only download the script from trusted sources and read it before running it on a production masternode.
 
 ## Mode 1 – Recovery without trusted addnodes
 

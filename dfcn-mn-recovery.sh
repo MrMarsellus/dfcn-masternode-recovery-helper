@@ -371,9 +371,55 @@ check_addnode_candidates() {
   success "Trusted addnode candidate checks completed."
 }
 
+get_local_service_ip() {
+  # Try externalip= from defcon.conf first
+  local ip raw_externalip
+  raw_externalip="$(grep -E '^[[:space:]]*externalip=' "${DEFAULT_CONF_FILE}" 2>/dev/null | head -n1 | cut -d'=' -f2- | xargs || true)"
+
+  if [ -n "${raw_externalip}" ]; then
+    ip="${raw_externalip}"
+
+    # If externalip is stored as IP:PORT, strip the port
+    if [[ "${ip}" == *:* ]]; then
+      ip="${ip%:*}"
+    fi
+
+    if is_valid_ipv4 "${ip}"; then
+      echo "${ip}"
+      return 0
+    fi
+  fi
+
+  # Fallback: try masternode status -> addr/service
+  local mn_json addr
+  mn_json="$(run_cli masternode status 2>/dev/null || echo "")"
+  addr="$(echo "${mn_json}" | jq -r '.addr // .service // empty' 2>/dev/null || echo "")"
+
+  if [ -n "${addr}" ]; then
+    addr="${addr#\[}"   # strip leading '[' if present
+    addr="${addr%\]}"   # strip trailing ']' if present
+    addr="${addr%:*}"   # drop port
+    if is_valid_ipv4 "${addr}"; then
+      echo "${addr}"
+      return 0
+    fi
+  fi
+
+  echo ""
+  return 1
+}
 collect_pose_problem_nodes() {
   print_line
   info "Evaluating live deterministic masternode state for PoSe issues (registered true)..."
+
+  # Determine local service IP once, so we can exclude it from the banlist
+  local LOCAL_SERVICE_IP
+  LOCAL_SERVICE_IP="$(get_local_service_ip || echo "")"
+  if [ -n "${LOCAL_SERVICE_IP}" ]; then
+    info "Local masternode service IP detected: ${LOCAL_SERVICE_IP}"
+  else
+    warn "Could not automatically detect local masternode service IP; no local exclusion will be applied."
+  fi
 
   local protx_json
   protx_json="$(run_cli_json protx list registered true)"
@@ -402,7 +448,12 @@ collect_pose_problem_nodes() {
     fi
 
     ip="${service%:*}"
-    if ! is_valid_ipv4 "${ip}" ]; then
+    if ! is_valid_ipv4 "${ip}"; then
+      continue
+    fi
+
+    # Never add our own service IP to any PoSe list
+    if [ -n "${LOCAL_SERVICE_IP}" ] && [ "${ip}" = "${LOCAL_SERVICE_IP}" ]; then
       continue
     fi
 
@@ -442,14 +493,14 @@ collect_pose_problem_nodes() {
   ALL_POSE_COUNT=${#ALL_POSE_IPS[@]}
 
   print_line
-  echo "PoSe analysis summary (registered true):"
+  echo "PoSe analysis summary (registered true, local IP excluded if detected):"
   echo " - Unique PoSe-banned masternode IPs   : ${POSE_BANNED_COUNT}"
   echo " - Unique masternode IPs with score > 0: ${POSE_SCORED_COUNT}"
   echo " - Total unique service IPs collected  : ${ALL_POSE_COUNT}"
   print_line
 
   if [ "${ALL_POSE_COUNT}" -eq 0 ]; then
-    warn "No problematic masternodes were found in 'registered true' list."
+    warn "No problematic masternodes were found in 'registered true' list (after excluding local IP)."
     return 1
   fi
 

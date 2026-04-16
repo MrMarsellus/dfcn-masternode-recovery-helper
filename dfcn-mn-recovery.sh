@@ -30,6 +30,14 @@ SERVICE_WAS_DISABLED=0
 SERVICE_WAS_MASKED=0
 
 USE_RANDOM_CANDIDATES=1
+REFERENCE_HEIGHT=""
+ADDNODE_CHECK_MODE="soft"
+
+ADDNODE_TEST_ROUNDS_HARD=5
+ADDNODE_MIN_SUCCESS_HARD=3
+ADDNODE_MAX_HEIGHT_DIFF=15
+ADDNODE_TCP_TIMEOUT=5
+ADDNODE_PEER_SLEEP=4
 
 print_line() {
   echo "------------------------------------------------------------"
@@ -84,6 +92,186 @@ is_valid_ipv4() {
   done
 
   return 0
+}
+
+is_number() {
+  [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
+trim() {
+  local s="${1:-}"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+dedupe_addnodes_array() {
+  local -A seen=()
+  local -a result=()
+  local item
+
+  for item in "${ADDNODES[@]}"; do
+    if [[ -n "${item}" && -z "${seen[$item]:-}" ]]; then
+      seen["$item"]=1
+      result+=("$item")
+    fi
+  done
+
+  ADDNODES=("${result[@]}")
+}
+
+dedupe_candidates_array() {
+  local -A seen=()
+  local -a result=()
+  local item
+
+  for item in "${CANDIDATES[@]}"; do
+    if [[ -n "${item}" && -z "${seen[$item]:-}" ]]; then
+      seen["$item"]=1
+      result+=("$item")
+    fi
+  done
+
+  CANDIDATES=("${result[@]}")
+}
+
+dedupe_good_addnodes_array() {
+  local -A seen=()
+  local -a result=()
+  local item
+
+  for item in "${GOOD_ADDNODES[@]}"; do
+    if [[ -n "${item}" && -z "${seen[$item]:-}" ]]; then
+      seen["$item"]=1
+      result+=("$item")
+    fi
+  done
+
+  GOOD_ADDNODES=("${result[@]}")
+}
+
+normalize_node() {
+  local node="$1"
+  if [[ "$node" != *:* ]]; then
+    echo "${node}:${DEFAULT_PORT}"
+  else
+    echo "$node"
+  fi
+}
+
+get_local_height() {
+  local h
+  h="$(run_cli getblockcount 2>/dev/null || true)"
+  is_number "$h" || return 1
+  echo "$h"
+}
+
+prompt_reference_height() {
+  local input local_height
+
+  print_line
+  echo "Reference block height for addnode checks"
+  echo
+  echo "Please enter the block height of the correct active chain."
+  echo "Use a trusted source, for example the official explorer"
+  echo "or another known-good fully synced node."
+  echo
+  echo "Important"
+  echo "- If this VPS is on the wrong fork, its local block height may be wrong."
+  echo "- In that case, you should enter the reference block height of the correct chain."
+  echo
+  echo "If you press Enter without typing a value,"
+  echo "the script will automatically use the current local block height."
+  echo
+
+  local_height="$(get_local_height || echo "")"
+  if ! is_number "$local_height"; then
+    error "Could not read local block height from defcon-cli."
+    exit 1
+  fi
+
+  read -r -p "Reference block height (empty = use local ${local_height}): " input
+  input="$(trim "${input:-}")"
+
+  if [[ -z "$input" ]]; then
+    REFERENCE_HEIGHT="$local_height"
+    info "No value entered. Using local block height as reference: ${REFERENCE_HEIGHT}"
+  else
+    if ! is_number "$input"; then
+      error "Invalid block height. Please enter a numeric value."
+      exit 1
+    fi
+    REFERENCE_HEIGHT="$input"
+    info "Using user-defined reference block height: ${REFERENCE_HEIGHT}"
+  fi
+
+  print_line
+}
+
+prompt_addnode_check_mode() {
+  local choice
+
+  print_line
+  echo "Addnode check mode"
+  echo "  1) Fast / soft check"
+  echo "     - one round per node"
+  echo "     - basic filtering"
+  echo "     - faster, less strict"
+  echo
+  echo "  2) Intensive / hard check"
+  echo "     - 5 rounds per node"
+  echo "     - at least 3 rounds must pass"
+  echo "     - stricter filtering"
+  print_line
+
+  while true; do
+    read -r -p "Enter 1 or 2: " choice
+    case "$choice" in
+      1)
+        ADDNODE_CHECK_MODE="soft"
+        info "Selected addnode check mode: soft"
+        return 0
+        ;;
+      2)
+        ADDNODE_CHECK_MODE="hard"
+        info "Selected addnode check mode: hard"
+        return 0
+        ;;
+      *)
+        warn "Invalid selection. Please enter 1 or 2."
+        ;;
+    esac
+  done
+}
+
+get_peer_json_by_host() {
+  local host="$1"
+  run_cli getpeerinfo 2>/dev/null | jq -c --arg host "$host" '
+    .[] | select(
+      (.addr? | tostring | startswith($host + ":")) or
+      (.addrbind? | tostring | contains($host)) or
+      (.addrlocal? | tostring | contains($host))
+    )' | head -n 1
+}
+
+get_masternodelist_status_word() {
+  local node="$1"
+  local status_json
+
+  status_json="$(run_cli masternodelist status "$node" 2>/dev/null || true)"
+  if [[ -z "$status_json" || "$status_json" == "{}" ]]; then
+    echo ""
+    return 1
+  fi
+
+  echo "$status_json" | grep -Eo 'ENABLED|POSE_BANNED' | head -n 1 || true
+}
+
+get_protx_match() {
+  local node="$1"
+  run_cli protx list registered true 2>/dev/null \
+    | jq -c --arg node "$node" '.[] | select((.state.service // "") == $node)' \
+    | head -n 1
 }
 
 show_intro() {
@@ -158,6 +346,21 @@ check_binaries() {
     exit 1
   fi
 
+  if ! command -v timeout >/dev/null 2>&1; then
+    error "timeout is required but was not found."
+    exit 1
+  fi
+
+  if ! command -v grep >/dev/null 2>&1; then
+    error "grep is required but was not found."
+    exit 1
+  fi
+
+  if ! command -v awk >/dev/null 2>&1; then
+    error "awk is required but was not found."
+    exit 1
+  fi
+
   success "Required binaries were found."
 }
 
@@ -166,8 +369,12 @@ load_addnodes() {
 
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%%#*}"
-    line="$(echo "$line" | xargs)"
+    line="$(trim "$line")"
+
     if [ -n "$line" ]; then
+      line="$(echo "$line" | sed -E 's/^[[:space:]]*addnode[[:space:]]+//I')"
+      line="$(echo "$line" | awk '{print $1}')"
+      line="$(normalize_node "$line")"
       ADDNODES+=("$line")
     fi
   done < "${DEFAULT_ADDNODE_FILE}"
@@ -190,13 +397,22 @@ show_addnodes() {
 
 validate_addnodes() {
   local invalid_count=0
+  local normalized=()
+  local node
 
   for node in "${ADDNODES[@]}"; do
+    node="$(normalize_node "$node")"
+
     if ! echo "$node" | grep -Eq '^[a-zA-Z0-9._-]+:[0-9]+$'; then
       warn "Invalid addnode format: $node"
       invalid_count=$((invalid_count + 1))
+      continue
     fi
+
+    normalized+=("$node")
   done
+
+  ADDNODES=("${normalized[@]}")
 
   if [ "$invalid_count" -gt 0 ]; then
     error "One or more addnodes have an invalid format."
@@ -222,6 +438,7 @@ prompt_addnodes_source() {
         USE_RANDOM_CANDIDATES=1
         check_addnode_file
         load_addnodes
+        dedupe_addnodes_array
         return 0
         ;;
       2)
@@ -250,12 +467,13 @@ prompt_addnodes_source() {
 
         for raw in "${lines[@]}"; do
           local line="${raw%%#*}"
-          line="$(echo "$line" | xargs)"
+          line="$(trim "$line")"
 
           [ -z "$line" ] && continue
 
-          line="$(echo "$line" | sed -E 's/^[[:space:]]*addnode[:[:space:]]+//I')"
+          line="$(echo "$line" | sed -E 's/^[[:space:]]*addnode[[:space:]]+//I')"
           line="$(echo "$line" | awk '{print $1}')"
+          line="$(normalize_node "$line")"
 
           if echo "$line" | grep -Eq '^[A-Za-z0-9._-]+:[0-9]+$'; then
             ADDNODES+=("$line")
@@ -271,7 +489,9 @@ prompt_addnodes_source() {
           exit 1
         fi
 
-        echo "Using ${#ADDNODES[@]} addnodes from manual input (max ${max_nodes})."
+        dedupe_addnodes_array
+        echo "Collected ${#ADDNODES[@]} unique addnodes from manual input."
+        echo "These nodes will now be validated and tested."
         return 0
         ;;
       *)
@@ -482,6 +702,8 @@ pick_random_candidates() {
     # Option 2: keine Random-Auswahl, nutze ADDNODES direkt
     CANDIDATES=("${ADDNODES[@]}")
 
+    dedupe_candidates_array
+
     if [ "${#CANDIDATES[@]}" -eq 0 ]; then
       error "No candidate addnodes were selected from manual input."
       exit 1
@@ -497,6 +719,8 @@ pick_random_candidates() {
     # Option 1: bisherige Random-Logik aus trustedaddnodes.txt
     mapfile -t CANDIDATES < <(printf '%s\n' "${ADDNODES[@]}" | shuf | head -n "${MAX_RANDOM_CANDIDATES}")
 
+    dedupe_candidates_array
+
     if [ "${#CANDIDATES[@]}" -eq 0 ]; then
       error "No candidate addnodes were selected."
       exit 1
@@ -511,47 +735,178 @@ pick_random_candidates() {
   fi
 }
 
-check_addnode_candidates() {
-  print_line
-  info "Checking random trusted addnode candidates..."
+test_node_once_soft_or_hard() {
+  local node="$1"
+  local host port peer_json peer_height
+  local status_word protx_match
+  local pose_penalty pose_ban_height revocation_reason last_paid_height
+
+  host="${node%:*}"
+  port="${node##*:}"
+
+  info "Testing ${node}"
+
+  if ! timeout "${ADDNODE_TCP_TIMEOUT}" bash -c "echo > /dev/tcp/${host}/${port}" 2>/dev/null; then
+    warn "Port check failed for ${node}"
+    return 1
+  fi
+  success "Port check passed for ${node}"
+
+  run_cli addnode "${node}" onetry >/dev/null 2>&1 || true
+  sleep "${ADDNODE_PEER_SLEEP}"
+
+  peer_json="$(get_peer_json_by_host "$host" 2>/dev/null || true)"
+  if [[ -z "$peer_json" ]]; then
+    warn "Peer check failed for ${node} (not visible in getpeerinfo)"
+    return 1
+  fi
+  success "Peer check passed for ${node}"
+
+  peer_height="$(jq -r '.synced_headers // .startingheight // .synced_blocks // empty' <<< "$peer_json" 2>/dev/null || true)"
+  if is_number "$peer_height"; then
+    echo "  Peer height      : ${peer_height}"
+    echo "  Reference height : ${REFERENCE_HEIGHT}"
+    if (( peer_height + ADDNODE_MAX_HEIGHT_DIFF < REFERENCE_HEIGHT )); then
+      warn "Height check failed for ${node} (peer is too far behind reference height)"
+      return 1
+    fi
+  else
+    warn "Height check failed for ${node} (peer height unknown)"
+    return 1
+  fi
+
+  status_word="$(get_masternodelist_status_word "$node" || true)"
+  if [[ "$status_word" == "POSE_BANNED" ]]; then
+    warn "Masternodelist status failed for ${node} (POSE_BANNED)"
+    return 1
+  fi
+
+  protx_match="$(get_protx_match "$node")"
+  if [[ -z "$protx_match" ]]; then
+    warn "ProTx lookup failed for ${node} (service not found)"
+    return 1
+  fi
+
+  pose_penalty="$(jq -r '.state.PoSePenalty // 0' <<< "$protx_match")"
+  pose_ban_height="$(jq -r '.state.PoSeBanHeight // -1' <<< "$protx_match")"
+  revocation_reason="$(jq -r '.state.revocationReason // 0' <<< "$protx_match")"
+  last_paid_height="$(jq -r '.state.lastPaidHeight // 0' <<< "$protx_match")"
+
+  echo "  ProTx PoSePenalty     : ${pose_penalty}"
+  echo "  ProTx PoSeBanHeight   : ${pose_ban_height}"
+  echo "  ProTx revocationReason: ${revocation_reason}"
+  echo "  ProTx lastPaidHeight  : ${last_paid_height}"
+
+  if is_number "$pose_penalty" && (( pose_penalty > 0 )); then
+    warn "ProTx check failed for ${node} (PoSePenalty > 0)"
+    return 1
+  fi
+
+  if is_number "$pose_ban_height" && (( pose_ban_height > 0 )); then
+    warn "ProTx check failed for ${node} (PoSeBanHeight > 0)"
+    return 1
+  fi
+
+  if is_number "$revocation_reason" && (( revocation_reason > 0 )); then
+    warn "ProTx check failed for ${node} (revocationReason > 0)"
+    return 1
+  fi
+
+  if is_number "$last_paid_height" && (( last_paid_height == 0 )); then
+    if [[ "$ADDNODE_CHECK_MODE" == "hard" ]]; then
+      warn "Reward history check failed for ${node} (lastPaidHeight = 0)"
+      return 1
+    else
+      warn "Reward history warning for ${node} (lastPaidHeight = 0)"
+    fi
+  fi
+
+  success "Node passed this round: ${node}"
+  return 0
+}
+
+check_addnode_candidates_soft() {
+  local node
 
   GOOD_ADDNODES=()
   BAD_ADDNODES=()
 
+  print_line
+  info "Checking trusted addnode candidates in soft mode..."
+
   for node in "${CANDIDATES[@]}"; do
-    local host port
-    host="${node%:*}"
-    port="${node##*:}"
-
-    info "Testing ${node}"
-
-    if ! timeout 5 bash -c "echo > /dev/tcp/${host}/${port}" 2>/dev/null; then
-      warn "Port check failed for ${node}"
-      BAD_ADDNODES+=("${node}")
-      continue
-    fi
-
-    run_cli addnode "${node}" onetry >/dev/null 2>&1 || true
-    sleep 3
-
-    if run_cli getpeerinfo 2>/dev/null | grep -q "${host}"; then
-      success "Peer check passed for ${node}"
-      GOOD_ADDNODES+=("${node}")
+    if test_node_once_soft_or_hard "$node"; then
+      GOOD_ADDNODES+=("$node")
     else
-      warn "Peer check failed for ${node}"
-      BAD_ADDNODES+=("${node}")
+      BAD_ADDNODES+=("$node")
     fi
 
     if [ "${#GOOD_ADDNODES[@]}" -ge "${MAX_GOOD_ADDNODES}" ]; then
       break
     fi
+
+    print_line
   done
+}
+
+check_addnode_candidates_hard() {
+  local node round success_count
+  GOOD_ADDNODES=()
+  BAD_ADDNODES=()
+
+  print_line
+  info "Checking trusted addnode candidates in hard mode..."
+
+  for node in "${CANDIDATES[@]}"; do
+    success_count=0
+
+    for ((round=1; round<=ADDNODE_TEST_ROUNDS_HARD; round++)); do
+      echo "Round ${round}/${ADDNODE_TEST_ROUNDS_HARD} for ${node}"
+      if test_node_once_soft_or_hard "$node"; then
+        success_count=$((success_count + 1))
+      fi
+      echo
+    done
+
+    echo "Passed rounds for ${node}: ${success_count}/${ADDNODE_TEST_ROUNDS_HARD}"
+
+    if [ "${success_count}" -ge "${ADDNODE_MIN_SUCCESS_HARD}" ]; then
+      GOOD_ADDNODES+=("$node")
+      success "Accepted: ${node}"
+    else
+      BAD_ADDNODES+=("$node")
+      warn "Rejected: ${node}"
+    fi
+
+    if [ "${#GOOD_ADDNODES[@]}" -ge "${MAX_GOOD_ADDNODES}" ]; then
+      break
+    fi
+
+    print_line
+  done
+}
+
+check_addnode_candidates() {
+  print_line
+  info "Reference block height used for addnode checks: ${REFERENCE_HEIGHT}"
+  info "Selected addnode check mode: ${ADDNODE_CHECK_MODE}"
+
+  if [[ "${ADDNODE_CHECK_MODE}" == "hard" ]]; then
+    check_addnode_candidates_hard
+  else
+    check_addnode_candidates_soft
+  fi
 
   print_line
   echo "Good trusted addnodes:"
-  for node in "${GOOD_ADDNODES[@]}"; do
-    echo "  - $node"
-  done
+  if [ "${#GOOD_ADDNODES[@]}" -eq 0 ]; then
+    echo "  none"
+  else
+    for node in "${GOOD_ADDNODES[@]}"; do
+      echo "  - $node"
+    done
+  fi
+
   echo
   echo "Rejected addnodes:"
   if [ "${#BAD_ADDNODES[@]}" -eq 0 ]; then
@@ -563,6 +918,8 @@ check_addnode_candidates() {
   fi
   print_line
 
+  dedupe_good_addnodes_array
+  
   if [ "${#GOOD_ADDNODES[@]}" -eq 0 ]; then
     error "No usable trusted addnodes passed the checks."
     exit 1
@@ -571,6 +928,10 @@ check_addnode_candidates() {
   if [ "${#GOOD_ADDNODES[@]}" -lt 3 ]; then
     warn "Fewer than 3 good addnodes passed the checks."
     warn "Recovery with addnodes can continue, but confidence is lower."
+  fi
+
+  if [ "${#GOOD_ADDNODES[@]}" -gt "${MAX_GOOD_ADDNODES}" ]; then
+    GOOD_ADDNODES=("${GOOD_ADDNODES[@]:0:${MAX_GOOD_ADDNODES}}")
   fi
 
   success "Trusted addnode candidate checks completed."
@@ -794,17 +1155,30 @@ read_pose_banlist_state() {
 
 collect_ips_from_pose_file() {
   local file="$1"
-  local -n out_array="$2"
-
-  out_array=()
+  local target_array="$2"
+  local line
+  local -a result=()
 
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%%#*}"
     line="$(echo "$line" | xargs)"
     if [ -n "${line}" ] && is_valid_ipv4 "${line}"; then
-      out_array+=("${line}")
+      result+=("${line}")
     fi
   done < "${file}"
+
+  case "$target_array" in
+    PREPARED_POSE_IPS)
+      PREPARED_POSE_IPS=("${result[@]}")
+      ;;
+    TRACKED_POSE_IPS)
+      TRACKED_POSE_IPS=("${result[@]}")
+      ;;
+    *)
+      error "Unsupported target array in collect_ips_from_pose_file: ${target_array}"
+      return 1
+      ;;
+  esac
 }
 
 prepare_pose_banlist() {
@@ -1178,6 +1552,7 @@ cleanup_recovery_files() {
 
 write_trusted_addnodes_to_conf() {
   print_line
+  dedupe_good_addnodes_array
   warn "Recovery with trusted addnodes will now manage addnode entries in defcon.conf."
 
   if ! ask_yes_no "Do you want to update defcon.conf with the verified trusted addnodes?"; then
@@ -1464,19 +1839,26 @@ run_recovery_addnodes_mode() {
   info "Selected: Recovery with trusted addnodes."
   print_line
   echo "This mode performs a cautious recovery AND manages a helper-controlled trusted addnode list in defcon.conf."
-  echo "PoSe-based bans can optionally be prepared and will be applied after cleanup+restart."
+  echo "PoSe-based bans can optionally be prepared and will be applied after cleanup and restart."
   print_line
 
   prompt_addnodes_source
-  show_addnodes
   validate_addnodes
+  show_addnodes
+  prompt_reference_height
+  prompt_addnode_check_mode
   pick_random_candidates
   check_addnode_candidates
   show_local_status
   check_service_and_process
   backup_conf
   offer_pose_banlist_preparation
-  stop_daemon_cautious || exit 1
+
+  stop_daemon_cautious || {
+    error "Verified stopped state was not reached."
+    warn "Aborting before cleanup to avoid corruption."
+    exit 1
+  }
 
   if ! verify_daemon_stopped; then
     error "Verified stopped state was not reached."
@@ -1487,9 +1869,14 @@ run_recovery_addnodes_mode() {
   remove_lock_file
   cleanup_recovery_files
   write_trusted_addnodes_to_conf
-  start_daemon_cautious || exit 1
+  start_daemon_cautious || {
+    error "Daemon start step failed."
+    exit 1
+  }
+
   apply_prepared_pose_bans
   interactive_monitoring_menu
+
   info "Showing final local status snapshot..."
   show_local_status
   show_protx_placeholder
@@ -1616,7 +2003,7 @@ main() {
   if [[ "${MODE}" == "recovery_addnodes" ]]; then
     print_line
     print_line
-    echo "[Note] Once your masternode has been stable for several days, run this script again and select"
+    echo "[Note] Once your masternode has been fully synced and stable for several days, run this script again and select"
     echo "'Restore normal mode' to revert from helper-managed trusted addnodes and remove temporary PoSe bans."
   fi
 

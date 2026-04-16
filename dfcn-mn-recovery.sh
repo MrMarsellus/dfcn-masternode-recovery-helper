@@ -550,14 +550,17 @@ check_addnode_candidates() {
   print_line
   echo "Good trusted addnodes:"
   for node in "${GOOD_ADDNODES[@]}"; do
-    echo " - ${node}"
+    echo "  - $node"
   done
-
   echo
   echo "Rejected addnodes:"
-  for node in "${BAD_ADDNODES[@]}"; do
-    echo " - ${node}"
-  done
+  if [ "${#BAD_ADDNODES[@]}" -eq 0 ]; then
+    echo "  none"
+  else
+    for node in "${BAD_ADDNODES[@]}"; do
+      echo "  - $node"
+    done
+  fi
   print_line
 
   if [ "${#GOOD_ADDNODES[@]}" -eq 0 ]; then

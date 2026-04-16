@@ -209,7 +209,7 @@ prompt_addnodes_source() {
   print_line
   echo "Trusted addnodes source:"
   echo "  1) Use existing list from ${DEFAULT_ADDNODE_FILE}"
-  echo "  2) Enter addnodes manually"
+  echo "  2) Enter addnodes manually (opens nano editor)"
   print_line
 
   local choice
@@ -225,56 +225,35 @@ prompt_addnodes_source() {
         ADDNODES=()
         print_line
 
-        local max_lines=50
-
-        echo "Enter trusted addnodes (format IP:PORT or HOSTNAME:PORT)."
-        echo "Paste multiple lines if you like."
-        echo "After pasting, press ENTER once more on an empty line to finish."
-        echo "You may enter more, but ideally not much more than ${MAX_RANDOM_CANDIDATES} addnodes."
-        echo "*** IMPORTANT: Maximum manual input lines (accepted): ${max_lines} ***"
+        echo "Opening nano for manual addnode input..."
+        echo "Paste your addnodes (one per line) into the editor."
+        echo "Speichern mit Ctrl+O, dann Enter, dann Ctrl+X zum Beenden."
         print_line
 
-        local lines=()
-        local seen_non_empty=0
+        # Temporäre Datei für die manuelle Eingabe
+        local TMPFILE
+        TMPFILE="$(mktemp /tmp/defcon_addnodes.XXXXXX)" || {
+          error "Could not create temporary file."
+          exit 1
+        }
 
-        # Blockeingabe: sammle Zeilen bis leere Zeile nach Inhalt oder max_lines erreicht
-        while [ "${#lines[@]}" -lt "$max_lines" ]; do
-          local line
-          if ! read -r line; then
-            # EOF → Ende
-            break
-          fi
+        # Editor öffnen
+        nano "$TMPFILE"
 
+        # Datei in Array einlesen
+        mapfile -t lines < "$TMPFILE"
+        rm -f "$TMPFILE"
+
+        # Gesammelte Zeilen parsen, nur erste 30 gültige übernehmen
+        local max_nodes=30
+        local count=0
+
+        for raw in "${lines[@]}"; do
           # Kommentare entfernen, trimmen
-          line="${line%%#*}"
+          local line="${raw%%#*}"
           line="$(echo "$line" | xargs)"
 
-          # Vor dem ersten Inhalt: leere Zeilen ignorieren
-          if [ "$seen_non_empty" -eq 0 ] && [ -z "$line" ]; then
-            continue
-          fi
-
-          # Nach erstem Inhalt: leere Zeile beendet Block
-          if [ "$seen_non_empty" -eq 1 ] && [ -z "$line" ]; then
-            break
-          fi
-
-          if [ -n "$line" ]; then
-            seen_non_empty=1
-            lines+=("$line")
-          fi
-        done
-
-        # Limit hart durchsetzen
-        if [ "${#lines[@]}" -ge "$max_lines" ]; then
-          error "More than ${max_lines} manual input lines were entered."
-          echo "Please reduce the list (or use trusted_addnodes.txt with option 1) and try again."
-          exit 1
-        fi
-
-        # Gesammelte Zeilen parsen
-        for raw in "${lines[@]}"; do
-          local line="$raw"
+          [ -z "$line" ] && continue
 
           # Führendes 'addnode' / 'addnode:' entfernen
           line="$(echo "$line" | sed -E 's/^[[:space:]]*addnode[:[:space:]]+//I')"
@@ -284,13 +263,19 @@ prompt_addnodes_source() {
           # Nur HOST:PORT akzeptieren
           if echo "$line" | grep -Eq '^[A-Za-z0-9._-]+:[0-9]+$'; then
             ADDNODES+=("$line")
+            count=$((count + 1))
+            if [ "$count" -ge "$max_nodes" ]; then
+              break
+            fi
           fi
         done
 
         if [ "${#ADDNODES[@]}" -eq 0 ]; then
-          error "No addnodes were entered."
+          error "No valid addnodes were entered."
           exit 1
         fi
+
+        echo "Using ${#ADDNODES[@]} addnodes from manual input (max ${max_nodes})."
         return 0
         ;;
       *)

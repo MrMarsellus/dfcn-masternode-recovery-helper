@@ -29,6 +29,8 @@ POSE_TRACK_STATE_APPLIED="applied"
 SERVICE_WAS_DISABLED=0
 SERVICE_WAS_MASKED=0
 
+USE_RANDOM_CANDIDATES=1
+
 print_line() {
   echo "------------------------------------------------------------"
 }
@@ -217,11 +219,13 @@ prompt_addnodes_source() {
     read -r -p "Enter 1 or 2: " choice
     case "${choice}" in
       1)
+        USE_RANDOM_CANDIDATES=1
         check_addnode_file
         load_addnodes
         return 0
         ;;
       2)
+        USE_RANDOM_CANDIDATES=0
         ADDNODES=()
         print_line
 
@@ -230,37 +234,29 @@ prompt_addnodes_source() {
         echo "Save with Ctrl+O, then Enter, then Ctrl+X to exit."
         print_line
 
-        # Temporäre Datei für die manuelle Eingabe
         local TMPFILE
         TMPFILE="$(mktemp /tmp/defcon_addnodes.XXXXXX)" || {
           error "Could not create temporary file."
           exit 1
         }
 
-        # Editor öffnen
         nano "$TMPFILE"
 
-        # Datei in Array einlesen
         mapfile -t lines < "$TMPFILE"
         rm -f "$TMPFILE"
 
-        # Gesammelte Zeilen parsen, nur erste 30 gültige übernehmen
         local max_nodes=30
         local count=0
 
         for raw in "${lines[@]}"; do
-          # Kommentare entfernen, trimmen
           local line="${raw%%#*}"
           line="$(echo "$line" | xargs)"
 
           [ -z "$line" ] && continue
 
-          # Führendes 'addnode' / 'addnode:' entfernen
           line="$(echo "$line" | sed -E 's/^[[:space:]]*addnode[:[:space:]]+//I')"
-          # Nur erstes Token behalten
           line="$(echo "$line" | awk '{print $1}')"
 
-          # Nur HOST:PORT akzeptieren
           if echo "$line" | grep -Eq '^[A-Za-z0-9._-]+:[0-9]+$'; then
             ADDNODES+=("$line")
             count=$((count + 1))
@@ -481,19 +477,38 @@ choose_mode() {
 
 pick_random_candidates() {
   CANDIDATES=()
-  mapfile -t CANDIDATES < <(printf '%s\n' "${ADDNODES[@]}" | shuf | head -n "${MAX_RANDOM_CANDIDATES}")
 
-  if [ "${#CANDIDATES[@]}" -eq 0 ]; then
-    error "No candidate addnodes were selected."
-    exit 1
+  if [ "${USE_RANDOM_CANDIDATES}" -eq 0 ]; then
+    # Option 2: keine Random-Auswahl, nutze ADDNODES direkt
+    CANDIDATES=("${ADDNODES[@]}")
+
+    if [ "${#CANDIDATES[@]}" -eq 0 ]; then
+      error "No candidate addnodes were selected from manual input."
+      exit 1
+    fi
+
+    print_line
+    info "Using ${#CANDIDATES[@]} addnodes from manual input for testing:"
+    for node in "${CANDIDATES[@]}"; do
+      echo "  - $node"
+    done
+    print_line
+  else
+    # Option 1: bisherige Random-Logik aus trustedaddnodes.txt
+    mapfile -t CANDIDATES < <(printf '%s\n' "${ADDNODES[@]}" | shuf | head -n "${MAX_RANDOM_CANDIDATES}")
+
+    if [ "${#CANDIDATES[@]}" -eq 0 ]; then
+      error "No candidate addnodes were selected."
+      exit 1
+    fi
+
+    print_line
+    info "Random candidate addnodes selected for testing:"
+    for node in "${CANDIDATES[@]}"; do
+      echo "  - $node"
+    done
+    print_line
   fi
-
-  print_line
-  info "Random candidate addnodes selected for testing:"
-  for node in "${CANDIDATES[@]}"; do
-    echo " - ${node}"
-  done
-  print_line
 }
 
 check_addnode_candidates() {

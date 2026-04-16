@@ -227,7 +227,7 @@ prompt_addnodes_source() {
 
         echo "Opening nano for manual addnode input..."
         echo "Paste your addnodes (one per line) into the editor."
-        echo "Speichern mit Ctrl+O, dann Enter, dann Ctrl+X zum Beenden."
+        echo "Save with Ctrl+O, then Enter, then Ctrl+X to exit."
         print_line
 
         # Temporäre Datei für die manuelle Eingabe

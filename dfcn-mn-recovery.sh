@@ -685,9 +685,15 @@ choose_mode() {
   read -r -p "Enter 1, 2 or 3: " SELECTED_MODE
 
   case "${SELECTED_MODE}" in
-    1) MODE="recovery_plain" ;;
-    2) MODE="recovery_addnodes" ;;
-    3) MODE="restore" ;;
+    1)
+      MODE="recovery_plain"
+      ;;
+    2)
+      MODE="recovery_addnodes"
+      ;;
+    3)
+      MODE="restore"
+      ;;
     *)
       error "Invalid mode selected."
       exit 1
@@ -1998,7 +2004,7 @@ main() {
       run_restore_mode
       ;;
     *)
-      error "Unknown mode."
+      error "Unknown mode: ${MODE:-unset}"
       exit 1
       ;;
   esac

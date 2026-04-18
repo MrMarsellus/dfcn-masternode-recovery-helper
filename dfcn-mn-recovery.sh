@@ -2,7 +2,7 @@
 
 set -u
 
-SCRIPT_VERSION="0.4.4"
+SCRIPT_VERSION="0.4.5"
 
 DEFAULT_DEFCON_USER="defcon"
 DEFAULT_DEFCON_HOME="/home/defcon"
@@ -75,6 +75,10 @@ run_cli() {
 
 run_cli_json() {
   "${DEFAULT_CLI}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" "$@" 2>/dev/null
+}
+
+service_unit_exists() {
+  systemctl list-unit-files | grep -q "^${DEFAULT_SERVICE}\.service"
 }
 
 is_valid_ipv4() {
@@ -1309,7 +1313,6 @@ remove_tracked_pose_bans() {
 
   local removed=0
   local missing=0
-  local failed=0
 
   for ip in "${TRACKED_POSE_IPS[@]}"; do
     if run_cli setban "${ip}" remove >/dev/null 2>&1; then
@@ -1324,8 +1327,7 @@ remove_tracked_pose_bans() {
   print_line
   echo "Tracked PoSe ban removal summary:"
   echo " - Successfully removed: ${removed}"
-  echo " - Not currently banned : ${missing}"
-  echo " - Other failures       : ${failed}"
+  echo " - Not currently banned or remove failed: ${missing}"
   print_line
 
   if ask_yes_no "Do you want to delete the recovery-helper PoSe banlist file now?"; then
@@ -1370,7 +1372,7 @@ verify_daemon_stopped() {
     proc_dead=0
   fi
 
-  if systemctl list-unit-files | grep -q "^${DEFAULT_SERVICE}\\.service"; then
+  if service_unit_exists; then
     if ! systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
       service_inactive=0
     fi
@@ -1384,12 +1386,12 @@ verify_daemon_stopped() {
 
   print_line
   echo "Stop verification:"
-  echo " - Process stopped : $([[ $proc_dead -eq 0 ]] && echo yes || echo no)"
-  echo " - Service inactive: $([[ $service_inactive -eq 0 ]] && echo yes || echo no)"
-  echo " - RPC unreachable : $([[ $rpc_dead -eq 0 ]] && echo yes || echo no)"
+  echo " - Process stopped : $([[ ${proc_dead} -eq 0 ]] && echo yes || echo no)"
+  echo " - Service inactive: $([[ ${service_inactive} -eq 0 ]] && echo yes || echo no)"
+  echo " - RPC unreachable : $([[ ${rpc_dead} -eq 0 ]] && echo yes || echo no)"
   print_line
 
-  if [[ $proc_dead -eq 0 && $service_inactive -eq 0 && $rpc_dead -eq 0 ]]; then
+  if [[ ${proc_dead} -eq 0 && ${service_inactive} -eq 0 && ${rpc_dead} -eq 0 ]]; then
     return 0
   fi
 
@@ -1401,7 +1403,7 @@ show_stop_summary() {
   echo "Shutdown summary"
   echo "----------------"
 
-  if systemctl list-unit-files | grep -q "^${DEFAULT_SERVICE}\\.service"; then
+  if service_unit_exists; then
     if systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
       echo "Service state : active"
     else
@@ -1430,6 +1432,14 @@ show_stop_summary() {
     echo "RPC state     : not responding"
   fi
 
+  if [[ "${SERVICE_WAS_DISABLED}" -eq 1 ]]; then
+    echo "Service note  : temporarily disabled by recovery helper"
+  fi
+
+  if [[ "${SERVICE_WAS_MASKED}" -eq 1 ]]; then
+    echo "Service note  : temporarily masked by recovery helper"
+  fi
+
   print_line
 }
 
@@ -1440,18 +1450,28 @@ stop_daemon_cautious() {
 
   if ! ask_yes_no "Do you want to try stopping the masternode daemon now?"; then
     warn "Stop step skipped by user."
-    return 0
+    return 1
   fi
 
-  info "Trying systemctl stop first..."
-  systemctl stop "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl stop did not succeed."
-  sleep 8
+  if service_unit_exists; then
+    if systemctl is-enabled "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+      info "Service is enabled. Trying systemctl disable first to prevent auto-restart..."
+      if systemctl disable "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+        SERVICE_WAS_DISABLED=1
+        success "Service disabled temporarily."
+      else
+        warn "systemctl disable did not succeed."
+      fi
+      sleep 2
+    else
+      info "Service is already not enabled."
+    fi
 
-  if ask_yes_no "Do you want to temporarily disable the service to prevent auto-restart during recovery?"; then
-    info "Trying systemctl disable..."
-    systemctl disable "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl disable did not succeed."
-    SERVICE_WAS_DISABLED=1
-    sleep 3
+    info "Trying systemctl stop..."
+    systemctl stop "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl stop did not succeed."
+    sleep 8
+  else
+    warn "Service file ${DEFAULT_SERVICE}.service was not found. Skipping systemctl disable/stop."
   fi
 
   if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
@@ -1461,7 +1481,7 @@ stop_daemon_cautious() {
   fi
 
   if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
-    warn "Daemon is still running after systemctl stop and RPC stop."
+    warn "Daemon is still running after service stop and RPC stop."
 
     if ask_yes_no "Do you want to try a normal kill on remaining daemon processes?"; then
       pkill -f "${DEFAULT_DAEMON}" || warn "Normal kill did not succeed."
@@ -1481,11 +1501,19 @@ stop_daemon_cautious() {
   if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
     warn "Daemon is still running after hard kill."
 
-    if ask_yes_no "Do you want to temporarily mask the service to block all restarts?"; then
-      systemctl mask "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl mask did not succeed."
-      SERVICE_WAS_MASKED=1
-      systemctl stop "${DEFAULT_SERVICE}" >/dev/null 2>&1 || true
-      sleep 5
+    if service_unit_exists; then
+      if ask_yes_no "Do you want to temporarily mask the service to block all restarts?"; then
+        if systemctl mask "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+          SERVICE_WAS_MASKED=1
+          success "Service masked temporarily."
+        else
+          warn "systemctl mask did not succeed."
+        fi
+        systemctl stop "${DEFAULT_SERVICE}" >/dev/null 2>&1 || true
+        sleep 5
+      fi
+    else
+      warn "Service masking is not possible because no service file was found."
     fi
   fi
 
@@ -1609,84 +1637,46 @@ restore_normal_mode_conf() {
 }
 
 restore_service_if_needed() {
-  if [[ "${SERVICE_WAS_MASKED}" -eq 0 && "${SERVICE_WAS_DISABLED}" -eq 0 ]]; then
-    return 0
-  fi
-
   print_line
-  info "Recovery helper changed the service state earlier."
+  info "Final service restore/start step..."
 
-  if [[ "${SERVICE_WAS_MASKED}" -eq 1 ]]; then
-    echo " - Service was temporarily masked"
-  fi
-
-  if [[ "${SERVICE_WAS_DISABLED}" -eq 1 ]]; then
-    echo " - Service was temporarily disabled"
-  fi
-
-  print_line
-
-  if ! ask_yes_no "Do you want to restore the service state now and start the service?"; then
-    warn "Service restore skipped by user."
-    warn "If needed, restore it manually later with systemctl unmask/enable/start."
-    return 0
-  fi
-
-  if [[ "${SERVICE_WAS_MASKED}" -eq 1 ]]; then
-    info "Trying systemctl unmask ${DEFAULT_SERVICE}..."
-    if ! systemctl unmask "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
-      error "systemctl unmask did not succeed."
-    else
-      success "Service unmasked."
-    fi
-    sleep 2
-  fi
-
-  if [[ "${SERVICE_WAS_DISABLED}" -eq 1 ]]; then
-    info "Trying systemctl enable ${DEFAULT_SERVICE}..."
-    if ! systemctl enable "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
-      error "systemctl enable did not succeed."
-    else
-      success "Service enabled."
-    fi
-    sleep 2
-  fi
-
-  info "Trying systemctl start ${DEFAULT_SERVICE}..."
-  if ! systemctl start "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
-    error "systemctl start did not succeed."
-    echo "Check with: systemctl status ${DEFAULT_SERVICE}"
-    echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
-    sleep 2
-  else
-    sleep 5
-    if systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
-      success "Daemon appears to be running after service restore."
-    else
-      warn "Daemon does not appear to be running after service restore."
-      echo "Check with: systemctl status ${DEFAULT_SERVICE}"
-      echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
-    fi
-  fi
-
-  check_service_and_process
-}
-
-start_daemon_cautious() {
-  print_line
-  warn "The script can now try to start the daemon again."
-
-  if ! ask_yes_no "Do you want to start the daemon now?"; then
-    warn "Start step skipped by user."
-    return 0
+  if ! service_unit_exists; then
+    error "Service file ${DEFAULT_SERVICE}.service was not found."
+    echo "Automatic enable/start via systemctl is not possible."
+    return 1
   fi
 
   info "Ensuring no manual ${DEFAULT_DAEMON} processes are running..."
   pkill -f "${DEFAULT_DAEMON}" >/dev/null 2>&1 || true
   sleep 2
 
+  local enabled_state
+  enabled_state="$(systemctl is-enabled "${DEFAULT_SERVICE}" 2>/dev/null || true)"
+
+  if [[ "${enabled_state}" == "enabled" ]]; then
+    info "Service is already enabled."
+  else
+    if [[ "${enabled_state}" == "masked" ]]; then
+      info "Service is masked. Trying systemctl unmask ${DEFAULT_SERVICE}..."
+      if ! systemctl unmask "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+        error "systemctl unmask did not succeed."
+        return 1
+      fi
+      success "Service unmasked."
+      sleep 2
+    fi
+
+    info "Trying systemctl enable ${DEFAULT_SERVICE}..."
+    if ! systemctl enable "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+      error "systemctl enable did not succeed."
+      return 1
+    fi
+    success "Service enabled."
+    sleep 2
+  fi
+
   info "Trying systemctl start ${DEFAULT_SERVICE}..."
-  if ! systemctl start "${DEFAULT_SERVICE}"; then
+  if ! systemctl start "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
     error "systemctl start did not succeed."
     echo "Check with: systemctl status ${DEFAULT_SERVICE}"
     echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
@@ -1697,13 +1687,15 @@ start_daemon_cautious() {
 
   if systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
     success "Daemon appears to be running via systemd."
+    check_service_and_process
     return 0
-  else
-    error "Daemon does not appear to be running after systemd start."
-    echo "Check with: systemctl status ${DEFAULT_SERVICE}"
-    echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
-    return 1
   fi
+
+  error "Daemon does not appear to be running after final service start."
+  echo "Check with: systemctl status ${DEFAULT_SERVICE}"
+  echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
+  check_service_and_process
+  return 1
 }
 
 show_protx_placeholder() {
@@ -1833,13 +1825,12 @@ run_recovery_plain_mode() {
   remove_lock_file
   cleanup_recovery_files
 
-  start_daemon_cautious || exit 1
+  restore_service_if_needed || exit 1
 
   interactive_monitoring_menu
   info "Showing final local status snapshot..."
   show_local_status
   show_protx_placeholder
-  restore_service_if_needed
 }
 
 run_recovery_addnodes_mode() {
@@ -1876,8 +1867,9 @@ run_recovery_addnodes_mode() {
   remove_lock_file
   cleanup_recovery_files
   write_trusted_addnodes_to_conf
-  start_daemon_cautious || {
-    error "Daemon start step failed."
+
+  restore_service_if_needed || {
+    error "Final service start step failed."
     exit 1
   }
 
@@ -1887,7 +1879,6 @@ run_recovery_addnodes_mode() {
   info "Showing final local status snapshot..."
   show_local_status
   show_protx_placeholder
-  restore_service_if_needed
 }
 
 check_ready_for_restore() {
@@ -1955,7 +1946,7 @@ run_restore_mode() {
   print_line
   echo "This mode is intended to revert changes made by Recovery with trusted addnodes"
   echo "and to remove temporary PoSe bans created by this helper."
-  echo "Unlike recovery modes, this mode does not require the daemon to be started in advance."
+  echo "For the recommended path, the daemon should be running and fully synced before restore is started."
   print_line
 
   check_ready_for_restore
@@ -1974,13 +1965,12 @@ run_restore_mode() {
   remove_lock_file
   restore_normal_mode_conf
 
-  start_daemon_cautious || exit 1
+  restore_service_if_needed || exit 1
 
   remove_tracked_pose_bans
 
   info "Showing final local status snapshot..."
   show_local_status
-  restore_service_if_needed
 }
 
 main() {

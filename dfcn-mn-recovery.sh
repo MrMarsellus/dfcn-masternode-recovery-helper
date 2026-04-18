@@ -2,7 +2,7 @@
 
 set -u
 
-SCRIPT_VERSION="0.4.4"
+SCRIPT_VERSION="0.4.3"
 
 DEFAULT_DEFCON_USER="defcon"
 DEFAULT_DEFCON_HOME="/home/defcon"
@@ -1356,184 +1356,143 @@ offer_pose_banlist_preparation() {
 }
 
 verify_daemon_stopped() {
- local proc_dead=1
- local service_inactive=1
- local rpc_dead=1
+  local rpc_dead=1
+  local proc_dead=1
+  local service_inactive=1
 
- if ! pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
-  proc_dead=0
- fi
-
- if systemctl list-unit-files | grep -q "^${DEFAULT_SERVICE}\.service"; then
-  if ! systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
-   service_inactive=0
+  if ! pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    proc_dead=0
   fi
- else
-  service_inactive=0
- fi
 
- if ! timeout 5 "${DEFAULT_CLI}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" getblockcount >/dev/null 2>&1; then
-  rpc_dead=0
- fi
+  if systemctl list-unit-files | grep -q "^${DEFAULT_SERVICE}\\.service"; then
+    if ! systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
+      service_inactive=0
+    fi
+  else
+    service_inactive=0
+  fi
 
- print_line
- echo "Stop verification:"
- echo " - Process stopped : $([[ ${proc_dead} -eq 0 ]] && echo yes || echo no)"
- echo " - Service inactive: $([[ ${service_inactive} -eq 0 ]] && echo yes || echo no)"
- echo " - RPC unreachable : $([[ ${rpc_dead} -eq 0 ]] && echo yes || echo no)"
- print_line
+  if ! timeout 5 "${DEFAULT_CLI}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" getblockcount >/dev/null 2>&1; then
+    rpc_dead=0
+  fi
 
- if [[ ${proc_dead} -eq 0 && ${service_inactive} -eq 0 && ${rpc_dead} -eq 0 ]]; then
-  return 0
- fi
+  print_line
+  echo "Stop verification:"
+  echo " - Process stopped : $([[ $proc_dead -eq 0 ]] && echo yes || echo no)"
+  echo " - Service inactive: $([[ $service_inactive -eq 0 ]] && echo yes || echo no)"
+  echo " - RPC unreachable : $([[ $rpc_dead -eq 0 ]] && echo yes || echo no)"
+  print_line
 
- return 1
+  if [[ $proc_dead -eq 0 && $service_inactive -eq 0 && $rpc_dead -eq 0 ]]; then
+    return 0
+  fi
+
+  return 1
 }
 
 show_stop_summary() {
- print_line
- echo "Shutdown summary"
- echo "----------------"
+  print_line
+  echo "Shutdown summary"
+  echo "----------------"
 
- if systemctl list-unit-files | grep -q "^${DEFAULT_SERVICE}\.service"; then
-  if systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
-   echo "Service state : active"
+  if systemctl list-unit-files | grep -q "^${DEFAULT_SERVICE}\\.service"; then
+    if systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
+      echo "Service state : active"
+    else
+      echo "Service state : inactive"
+    fi
+
+    if systemctl is-enabled "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+      echo "Service boot  : enabled"
+    else
+      echo "Service boot  : disabled or masked"
+    fi
   else
-   echo "Service state : inactive"
+    echo "Service state : service file not found"
   fi
 
-  if systemctl is-enabled "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
-   echo "Service boot  : enabled"
+  if pgrep -af "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    echo "Process state : running"
+    pgrep -af "${DEFAULT_DAEMON}"
   else
-   echo "Service boot  : disabled or masked"
+    echo "Process state : not running"
   fi
- else
-  echo "Service state : service unit not found"
- fi
 
- if pgrep -af "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
-  echo "Process state : running"
-  pgrep -af "${DEFAULT_DAEMON}"
- else
-  echo "Process state : not running"
- fi
+  if timeout 5 "${DEFAULT_CLI}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" getblockcount >/dev/null 2>&1; then
+    echo "RPC state     : responding"
+  else
+    echo "RPC state     : not responding"
+  fi
 
- if timeout 5 "${DEFAULT_CLI}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" getblockcount >/dev/null 2>&1; then
-  echo "RPC state     : responding"
- else
-  echo "RPC state     : not responding"
- fi
-
- print_line
+  print_line
 }
 
-ensure_clean_stop_with_retry() {
- local attempt=1
- local max_attempts=3
- local service_exists=0
- local answer=""
-
- if systemctl list-unit-files | grep -q "^${DEFAULT_SERVICE}\.service"; then
-  service_exists=1
- fi
-
- while (( attempt <= max_attempts )); do
+stop_daemon_cautious() {
   print_line
-  info "Preparing clean stop (attempt ${attempt}/${max_attempts})..."
+  warn "The next step can stop the daemon and service."
+  warn "This is required for cleanup or recovery actions."
 
-  info "Trying to stop daemon via RPC..."
-  run_cli stop >/dev/null 2>&1 || warn "RPC stop returned non-zero."
-  sleep 10
-
-  if verify_daemon_stopped; then
-   success "Daemon confirmed stopped after RPC stop."
-  else
-   if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
-    warn "Daemon still running after RPC stop. Trying normal kill..."
-    pkill -f "${DEFAULT_DAEMON}" >/dev/null 2>&1 || warn "pkill returned non-zero."
-    sleep 5
-   fi
-
-   if verify_daemon_stopped; then
-    success "Daemon confirmed stopped after normal kill."
-   else
-    if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
-     warn "Daemon still running after normal kill. Trying hard kill (SIGKILL)..."
-     pkill -9 -f "${DEFAULT_DAEMON}" >/dev/null 2>&1 || warn "pkill -9 returned non-zero."
-     sleep 3
-    fi
-
-    if verify_daemon_stopped; then
-     success "Daemon confirmed stopped after hard kill."
-    fi
-   fi
+  if ! ask_yes_no "Do you want to try stopping the masternode daemon now?"; then
+    warn "Stop step skipped by user."
+    return 0
   fi
 
-  if [[ ${service_exists} -eq 1 ]]; then
-   if ask_yes_no "Do you want to stop and temporarily disable the service now?"; then
-    info "Stopping service ${DEFAULT_SERVICE}..."
-    if systemctl stop "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
-     success "Service stopped."
-    else
-     warn "systemctl stop returned non-zero."
-    fi
-    sleep 3
+  info "Trying systemctl stop first..."
+  systemctl stop "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl stop did not succeed."
+  sleep 8
 
-    info "Disabling service ${DEFAULT_SERVICE}..."
-    if systemctl disable "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
-     SERVICE_WAS_DISABLED=1
-     success "Service disabled."
-    else
-     warn "systemctl disable returned non-zero."
+  if ask_yes_no "Do you want to temporarily disable the service to prevent auto-restart during recovery?"; then
+    info "Trying systemctl disable..."
+    systemctl disable "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl disable did not succeed."
+    SERVICE_WAS_DISABLED=1
+    sleep 3
+  fi
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    info "Trying RPC stop..."
+    run_cli stop >/dev/null 2>&1 || warn "RPC stop did not succeed."
+    sleep 10
+  fi
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    warn "Daemon is still running after systemctl stop and RPC stop."
+
+    if ask_yes_no "Do you want to try a normal kill on remaining daemon processes?"; then
+      pkill -f "${DEFAULT_DAEMON}" || warn "Normal kill did not succeed."
+      sleep 5
     fi
-    sleep 2
-   else
-    warn "Service stop/disable skipped by user."
-   fi
-  else
-   warn "Service unit ${DEFAULT_SERVICE}.service not found during stop."
+  fi
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    warn "Daemon is still running after normal kill."
+
+    if ask_yes_no "Do you want to try a hard kill (kill -9)?"; then
+      pkill -9 -f "${DEFAULT_DAEMON}" || warn "Hard kill did not succeed."
+      sleep 3
+    fi
+  fi
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    warn "Daemon is still running after hard kill."
+
+    if ask_yes_no "Do you want to temporarily mask the service to block all restarts?"; then
+      systemctl mask "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl mask did not succeed."
+      SERVICE_WAS_MASKED=1
+      systemctl stop "${DEFAULT_SERVICE}" >/dev/null 2>&1 || true
+      sleep 5
+    fi
   fi
 
   show_stop_summary
 
   if verify_daemon_stopped; then
-   success "Daemon and service are in a safely stopped state."
-   return 0
+    success "Daemon and service appear to be fully stopped."
+    return 0
   fi
 
-  error "Safe stopped state could NOT be confirmed on attempt ${attempt}."
-
-  if (( attempt >= max_attempts )); then
-   break
-  fi
-
-  read -r -p "Stop not confirmed. Retry stopping? [y/N]: " answer
-  case "${answer}" in
-   y|Y|yes|YES)
-    attempt=$((attempt + 1))
-    ;;
-   *)
-    error "User chose to abort because stop could not be confirmed."
-    return 1
-    ;;
-  esac
- done
-
- error "Daemon/service could not be stopped safely after ${max_attempts} attempts."
- error "Recovery cannot continue safely."
- return 1
-}
-
-stop_daemon_cautious() {
- print_line
- warn "The script will now ensure that daemon and service are fully stopped."
- warn "This is required before recovery changes are applied."
-
- if ensure_clean_stop_with_retry; then
-  return 0
- fi
-
- return 1
+  error "Safe stopped state was NOT confirmed."
+  warn "Cleanup or resync actions must not continue."
+  return 1
 }
 
 remove_lock_file() {
@@ -1644,135 +1603,101 @@ restore_normal_mode_conf() {
 }
 
 restore_service_if_needed() {
- local service_exists=0
-
- print_line
- info "The script will now offer to restore daemon and service startup."
-
- if systemctl list-unit-files | grep -q "^${DEFAULT_SERVICE}\.service"; then
-  service_exists=1
- fi
-
- if [[ ${service_exists} -eq 1 ]]; then
-  if ask_yes_no "Do you want to enable the service again?"; then
-   info "Unmasking service ${DEFAULT_SERVICE} (if needed)..."
-   if systemctl unmask "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
-    SERVICE_WAS_MASKED=1
-   fi
-
-   info "Enabling service ${DEFAULT_SERVICE}..."
-   if systemctl enable "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
-    success "Service enabled."
-   else
-    error "systemctl enable did not succeed."
-    return 1
-   fi
-  else
-   warn "Service enable skipped by user."
+  if [[ "${SERVICE_WAS_MASKED}" -eq 0 && "${SERVICE_WAS_DISABLED}" -eq 0 ]]; then
+    return 0
   fi
 
-  if ask_yes_no "Do you want to start the daemon/service now?"; then
-   info "Starting service ${DEFAULT_SERVICE}..."
-   if ! systemctl start "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+  print_line
+  info "Recovery helper changed the service state earlier."
+
+  if [[ "${SERVICE_WAS_MASKED}" -eq 1 ]]; then
+    echo " - Service was temporarily masked"
+  fi
+
+  if [[ "${SERVICE_WAS_DISABLED}" -eq 1 ]]; then
+    echo " - Service was temporarily disabled"
+  fi
+
+  print_line
+
+  if ! ask_yes_no "Do you want to restore the service state now and start the service?"; then
+    warn "Service restore skipped by user."
+    warn "If needed, restore it manually later with systemctl unmask/enable/start."
+    return 0
+  fi
+
+  if [[ "${SERVICE_WAS_MASKED}" -eq 1 ]]; then
+    info "Trying systemctl unmask ${DEFAULT_SERVICE}..."
+    if ! systemctl unmask "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+      error "systemctl unmask did not succeed."
+    else
+      success "Service unmasked."
+    fi
+    sleep 2
+  fi
+
+  if [[ "${SERVICE_WAS_DISABLED}" -eq 1 ]]; then
+    info "Trying systemctl enable ${DEFAULT_SERVICE}..."
+    if ! systemctl enable "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+      error "systemctl enable did not succeed."
+    else
+      success "Service enabled."
+    fi
+    sleep 2
+  fi
+
+  info "Trying systemctl start ${DEFAULT_SERVICE}..."
+  if ! systemctl start "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
     error "systemctl start did not succeed."
-    echo "Check: systemctl status ${DEFAULT_SERVICE}"
-    echo " and: journalctl -u ${DEFAULT_SERVICE} -n 50"
-    return 1
-   fi
-
-   sleep 5
-
-   if systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
-    success "Service started successfully."
-   else
-    error "Service is not active after start."
-    return 1
-   fi
+    echo "Check with: systemctl status ${DEFAULT_SERVICE}"
+    echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
+    sleep 2
   else
-   warn "Service start skipped by user."
+    sleep 5
+    if systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
+      success "Daemon appears to be running after service restore."
+    else
+      warn "Daemon does not appear to be running after service restore."
+      echo "Check with: systemctl status ${DEFAULT_SERVICE}"
+      echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
+    fi
   fi
- else
-  warn "Service unit ${DEFAULT_SERVICE}.service not found."
 
-  if ask_yes_no "Do you want to start the daemon manually now?"; then
-   info "Starting daemon manually..."
-   if ! "${DEFAULT_DAEMON}" -daemon -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" >/dev/null 2>&1; then
-    error "Manual daemon start failed."
-    return 1
-   fi
-   sleep 5
-
-   if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
-    success "Daemon started manually."
-   else
-    error "Daemon process not found after manual start."
-    return 1
-   fi
-  else
-   warn "Manual daemon start skipped by user."
-  fi
- fi
-
- check_service_and_process
- return 0
+  check_service_and_process
 }
 
-show_post_start_checks() {
- local attempts=0
- local max_attempts=3
- local sleep_between=10
- local health_ok=1
+start_daemon_cautious() {
+  print_line
+  warn "The script can now try to start the daemon again."
 
- print_line
- info "Checking whether the masternode is running cleanly after start..."
-
- check_service_and_process
-
- while (( attempts < max_attempts )); do
-  if timeout 10 "${DEFAULT_CLI}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" getbestblockhash >/dev/null 2>&1; then
-   health_ok=0
-   break
+  if ! ask_yes_no "Do you want to start the daemon now?"; then
+    warn "Start step skipped by user."
+    return 0
   fi
 
-  if timeout 10 "${DEFAULT_CLI}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" getnetworkinfo >/dev/null 2>&1; then
-   health_ok=0
-   break
+  info "Ensuring no manual ${DEFAULT_DAEMON} processes are running..."
+  pkill -f "${DEFAULT_DAEMON}" >/dev/null 2>&1 || true
+  sleep 2
+
+  info "Trying systemctl start ${DEFAULT_SERVICE}..."
+  if ! systemctl start "${DEFAULT_SERVICE}"; then
+    error "systemctl start did not succeed."
+    echo "Check with: systemctl status ${DEFAULT_SERVICE}"
+    echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
+    return 1
   fi
 
-  attempts=$((attempts + 1))
-  info "RPC health check not yet ready, waiting ${sleep_between}s... (attempt ${attempts}/${max_attempts})"
-  sleep "${sleep_between}"
- done
+  sleep 5
 
- if [[ ${health_ok} -eq 0 ]]; then
-  success "RPC is responding."
-
-  if timeout 10 "${DEFAULT_CLI}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" getbestblockhash >/dev/null 2>&1; then
-   echo "Best block hash : $("${DEFAULT_CLI}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" getbestblockhash 2>/dev/null || echo unknown)"
-  fi
-
-  if timeout 10 "${DEFAULT_CLI}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" getblockcount >/dev/null 2>&1; then
-   echo "Block height    : $("${DEFAULT_CLI}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" getblockcount 2>/dev/null || echo unknown)"
+  if systemctl is-active --quiet "${DEFAULT_SERVICE}"; then
+    success "Daemon appears to be running via systemd."
+    return 0
   else
-   warn "getblockcount is not responding yet, although RPC is reachable."
+    error "Daemon does not appear to be running after systemd start."
+    echo "Check with: systemctl status ${DEFAULT_SERVICE}"
+    echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
+    return 1
   fi
- else
-  error "RPC is not responding after ${max_attempts} attempts."
- fi
-
- echo
- echo "getnetworkinfo:"
- run_cli getnetworkinfo 2>/dev/null || warn "getnetworkinfo failed."
-
- echo
- echo "mnsync status:"
- run_cli mnsync status 2>/dev/null || warn "mnsync status failed."
-
- echo
- echo "masternode status:"
- run_cli masternode status 2>/dev/null || warn "masternode status failed."
-
- print_line
 }
 
 show_protx_placeholder() {
@@ -1891,27 +1816,23 @@ run_recovery_plain_mode() {
   check_service_and_process
   backup_conf
   offer_pose_banlist_preparation
+  stop_daemon_cautious || exit 1
 
-  if ! stop_daemon_cautious; then
-    error "Could not confirm a safe stopped state. Aborting before cleanup to avoid corruption."
+  if ! verify_daemon_stopped; then
+    error "Verified stopped state was not reached."
+    warn "Aborting before cleanup to avoid corruption."
     exit 1
   fi
 
   remove_lock_file
   cleanup_recovery_files
-
+  start_daemon_cautious || exit 1
   apply_prepared_pose_bans
   interactive_monitoring_menu
   info "Showing final local status snapshot..."
   show_local_status
   show_protx_placeholder
-
-  if ! restore_service_if_needed; then
-    error "Could not restore service/daemon cleanly."
-    exit 1
-  fi
-
-  show_post_start_checks
+  restore_service_if_needed
 }
 
 run_recovery_addnodes_mode() {
@@ -1933,27 +1854,33 @@ run_recovery_addnodes_mode() {
   backup_conf
   offer_pose_banlist_preparation
 
-  if ! stop_daemon_cautious; then
-    error "Could not confirm a safe stopped state. Aborting before cleanup to avoid corruption."
+  stop_daemon_cautious || {
+    error "Verified stopped state was not reached."
+    warn "Aborting before cleanup to avoid corruption."
+    exit 1
+  }
+
+  if ! verify_daemon_stopped; then
+    error "Verified stopped state was not reached."
+    warn "Aborting before cleanup to avoid corruption."
     exit 1
   fi
 
   remove_lock_file
   cleanup_recovery_files
   write_trusted_addnodes_to_conf
-  apply_prepared_pose_bans
+  start_daemon_cautious || {
+    error "Daemon start step failed."
+    exit 1
+  }
 
+  apply_prepared_pose_bans
   interactive_monitoring_menu
+
   info "Showing final local status snapshot..."
   show_local_status
   show_protx_placeholder
-
-  if ! restore_service_if_needed; then
-    error "Could not restore service/daemon cleanly."
-    exit 1
-  fi
-
-  show_post_start_checks
+  restore_service_if_needed
 }
 
 check_ready_for_restore() {
@@ -2027,25 +1954,21 @@ run_restore_mode() {
   show_local_status
   check_service_and_process
   backup_conf
+  stop_daemon_cautious || exit 1
 
-  if ! stop_daemon_cautious; then
-    error "Could not confirm a safe stopped state. Aborting before changing the configuration."
+  if ! verify_daemon_stopped; then
+    error "Verified stopped state was not reached."
+    warn "Aborting before changing the configuration."
     exit 1
   fi
 
   remove_lock_file
   remove_tracked_pose_bans
   restore_normal_mode_conf
-
+  start_daemon_cautious || exit 1
   info "Showing final local status snapshot..."
   show_local_status
-
-  if ! restore_service_if_needed; then
-    error "Could not restore service/daemon cleanly."
-    exit 1
-  fi
-
-  show_post_start_checks
+  restore_service_if_needed
 }
 
 main() {
@@ -2054,8 +1977,7 @@ main() {
   show_defaults
   check_conf_file
   check_binaries
-  # ensure_daemon_running
-  # disabled so recovery can run even if daemon/service is not running
+  ensure_daemon_running
   choose_mode
 
   case "${MODE}" in

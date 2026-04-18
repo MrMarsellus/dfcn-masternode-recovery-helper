@@ -2,7 +2,7 @@
 
 set -u
 
-SCRIPT_VERSION="0.4.3"
+SCRIPT_VERSION="0.4.4"
 
 DEFAULT_DEFCON_USER="defcon"
 DEFAULT_DEFCON_HOME="/home/defcon"
@@ -1806,16 +1806,16 @@ show_sync_progress() {
 }
 
 run_recovery_plain_mode() {
-  info "Selected: Recovery (without trusted addnodes)."
+  info "Selected: Recovery without trusted addnodes."
   print_line
-  echo "This mode performs a cautious recovery WITHOUT changing addnode= settings."
-  echo "PoSe-based bans can optionally be prepared and will be applied after cleanup+restart."
+  echo "This mode performs a cautious recovery WITHOUT changing addnode settings."
+  echo "No PoSe-based temporary banlist will be prepared in this mode."
   print_line
 
   show_local_status
   check_service_and_process
   backup_conf
-  offer_pose_banlist_preparation
+
   stop_daemon_cautious || exit 1
 
   if ! verify_daemon_stopped; then
@@ -1826,8 +1826,9 @@ run_recovery_plain_mode() {
 
   remove_lock_file
   cleanup_recovery_files
+
   start_daemon_cautious || exit 1
-  apply_prepared_pose_bans
+
   interactive_monitoring_menu
   info "Showing final local status snapshot..."
   show_local_status
@@ -1946,14 +1947,16 @@ check_ready_for_restore() {
 run_restore_mode() {
   info "Selected: Restore normal mode (remove helper-managed addnodes + PoSe-bans)."
   print_line
-  echo "This mode is intended to revert changes made by 'Recovery with trusted addnodes'"
+  echo "This mode is intended to revert changes made by Recovery with trusted addnodes"
   echo "and to remove temporary PoSe bans created by this helper."
+  echo "Unlike recovery modes, this mode does not require the daemon to be started in advance."
   print_line
 
   check_ready_for_restore
   show_local_status
   check_service_and_process
   backup_conf
+
   stop_daemon_cautious || exit 1
 
   if ! verify_daemon_stopped; then
@@ -1963,9 +1966,12 @@ run_restore_mode() {
   fi
 
   remove_lock_file
-  remove_tracked_pose_bans
   restore_normal_mode_conf
+
   start_daemon_cautious || exit 1
+
+  remove_tracked_pose_bans
+
   info "Showing final local status snapshot..."
   show_local_status
   restore_service_if_needed
@@ -1977,14 +1983,15 @@ main() {
   show_defaults
   check_conf_file
   check_binaries
-  ensure_daemon_running
   choose_mode
 
   case "${MODE}" in
-    recovery_plain)
+    recoveryplain)
+      ensure_daemon_running || exit 1
       run_recovery_plain_mode
       ;;
-    recovery_addnodes)
+    recoveryaddnodes)
+      ensure_daemon_running || exit 1
       run_recovery_addnodes_mode
       ;;
     restore)
@@ -2000,14 +2007,13 @@ main() {
   echo "Recovery helper run completed."
   echo "Please continue monitoring the node carefully."
 
-  if [[ "${MODE}" == "recovery_addnodes" ]]; then
+  if [[ "${MODE}" == "recoveryaddnodes" ]]; then
     print_line
-    print_line
-    echo "[Note] Once your masternode has been fully synced and stable for several days, run this script again and select"
-    echo "'Restore normal mode' to revert from helper-managed trusted addnodes and remove temporary PoSe bans."
+    echo "Note:"
+    echo "Once your masternode has been fully synced and stable for several days, run this script again and select"
+    echo "\"Restore normal mode\" to revert from helper-managed trusted addnodes and remove temporary PoSe bans."
   fi
 
-  print_line
   print_line
 }
 

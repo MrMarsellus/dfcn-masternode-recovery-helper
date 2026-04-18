@@ -1986,11 +1986,11 @@ main() {
   choose_mode
 
   case "${MODE}" in
-    recoveryplain)
+    recovery_plain)
       ensure_daemon_running || exit 1
       run_recovery_plain_mode
       ;;
-    recoveryaddnodes)
+    recovery_addnodes)
       ensure_daemon_running || exit 1
       run_recovery_addnodes_mode
       ;;
@@ -2007,7 +2007,7 @@ main() {
   echo "Recovery helper run completed."
   echo "Please continue monitoring the node carefully."
 
-  if [[ "${MODE}" == "recoveryaddnodes" ]]; then
+  if [[ "${MODE}" == "recovery_addnodes" ]]; then
     print_line
     echo "Note:"
     echo "Once your masternode has been fully synced and stable for several days, run this script again and select"

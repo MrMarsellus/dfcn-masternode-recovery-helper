@@ -43,6 +43,7 @@ SYNC_READY_SINCE_EPOCH=""
 PROTX_MIN_CONNECTIONS=6
 PROTX_MAX_PEER_PING=2
 PROTX_MIN_READY_SECONDS=600
+PROTX_MAX_TIP_AGE=600
 
 print_line() {
   echo "------------------------------------------------------------"
@@ -1837,16 +1838,17 @@ get_protx_readiness_snapshot() {
   if [[ -z "$peer_json" ]]; then peer_json="[]"; fi
   if [[ -z "$tips_json" ]]; then tips_json="[]"; fi
 
-  local blocks headers ibd
+  local blocks headers
   local asset_name is_blockchain_synced is_synced is_failed
   local connections peer_count
   local headers_only_count fork_count
   local high_ping_count max_ping
   local now_ts ready_seconds
+  local block_time best_block_age
 
   blocks="$(echo "$bc_json" | jq -r '.blocks // "unknown"' 2>/dev/null)"
   headers="$(echo "$bc_json" | jq -r '.headers // "unknown"' 2>/dev/null)"
-  ibd="$(echo "$bc_json" | jq -r '.initialblockdownload // "unknown"' 2>/dev/null)"
+  block_time="$(echo "$bc_json" | jq -r '.time // 0' 2>/dev/null)"
 
   asset_name="$(echo "$sync_json" | jq -r '.AssetName // "unknown"' 2>/dev/null)"
   is_blockchain_synced="$(echo "$sync_json" | jq -r '.IsBlockchainSynced // "unknown"' 2>/dev/null)"
@@ -1862,12 +1864,18 @@ get_protx_readiness_snapshot() {
   high_ping_count="$(echo "$peer_json" | jq --argjson max_ping "${PROTX_MAX_PEER_PING}" '[.[] | select(((.pingtime // 999999) > $max_ping))] | length' 2>/dev/null || echo 0)"
   max_ping="$(echo "$peer_json" | jq -r '[.[].pingtime // empty] | max // "n/a"' 2>/dev/null || echo "n/a")"
 
+  if is_number "${block_time}" && (( block_time > 0 )); then
+    now_ts="$(date +%s)"
+    best_block_age=$(( now_ts - block_time ))
+  else
+    best_block_age=-1
+  fi
+
   print_line
   echo "ProTx readiness check"
   echo "---------------------"
   echo "Blocks                : ${blocks}"
   echo "Headers               : ${headers}"
-  echo "Initial block download: ${ibd}"
   echo "Sync stage            : ${asset_name}"
   echo "Blockchain synced     : ${is_blockchain_synced}"
   echo "Masternode synced     : ${is_synced}"
@@ -1878,6 +1886,11 @@ get_protx_readiness_snapshot() {
   echo "Fork-like tips        : ${fork_count}"
   echo "Peers with ping > ${PROTX_MAX_PEER_PING}s: ${high_ping_count}"
   echo "Max peer ping         : ${max_ping}"
+  if (( best_block_age >= 0 )); then
+    echo "Best block age        : ${best_block_age} seconds"
+  else
+    echo "Best block age        : unknown"
+  fi
 
   if [[ -n "${SYNC_READY_SINCE_EPOCH}" ]]; then
     now_ts="$(date +%s)"
@@ -1897,10 +1910,7 @@ get_protx_readiness_snapshot() {
     hard_fail=1
   fi
 
-  if [[ "${ibd}" != "false" ]]; then
-    warn "initialblockdownload is not false yet."
-    hard_fail=1
-  fi
+  # initialblockdownload komplett entfernt
 
   if [[ "${asset_name}" != "MASTERNODE_SYNC_FINISHED" ]]; then
     warn "Masternode sync stage is not MASTERNODE_SYNC_FINISHED yet."
@@ -1929,6 +1939,13 @@ get_protx_readiness_snapshot() {
 
   if ! is_number "${headers_only_count}" || (( headers_only_count > 0 )); then
     warn "There are still headers-only chain tips."
+    hard_fail=1
+  fi
+
+  # Optional: Best-block-age als zusätzliche harte oder weiche Bedingung
+  # Beispiel: harter Check, wenn der Tip deutlich zu alt ist
+  if (( best_block_age >= 0 )) && (( best_block_age > PROTX_MAX_TIP_AGE )); then
+    warn "Best block age (${best_block_age}s) is older than recommended tip age (${PROTX_MAX_TIP_AGE}s)."
     hard_fail=1
   fi
 

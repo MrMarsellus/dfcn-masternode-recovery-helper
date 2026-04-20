@@ -2,7 +2,7 @@
 
 set -u
 
-SCRIPT_VERSION="0.4.5"
+SCRIPT_VERSION="0.4.6"
 
 DEFAULT_DEFCON_USER="defcon"
 DEFAULT_DEFCON_HOME="/home/defcon"
@@ -38,6 +38,11 @@ ADDNODE_MIN_SUCCESS_HARD=3
 ADDNODE_MAX_HEIGHT_DIFF=15
 ADDNODE_TCP_TIMEOUT=5
 ADDNODE_PEER_SLEEP=4
+
+SYNC_READY_SINCE_EPOCH=""
+PROTX_MIN_CONNECTIONS=6
+PROTX_MAX_PEER_PING=2
+PROTX_MIN_READY_SECONDS=600
 
 print_line() {
   echo "------------------------------------------------------------"
@@ -1771,6 +1776,7 @@ interactive_monitoring_menu() {
 show_sync_progress() {
   local block_height sync_json
   local asset_name is_blockchain_synced is_synced is_failed is_failed_raw
+  local now_ts ready_seconds
 
   block_height="$(run_cli getblockcount 2>/dev/null || true)"
   sync_json="$(run_cli mnsync status 2>/dev/null || true)"
@@ -1779,21 +1785,34 @@ show_sync_progress() {
   is_blockchain_synced="$(echo "$sync_json" | jq -r '.IsBlockchainSynced // "unknown"' 2>/dev/null)"
   is_synced="$(echo "$sync_json" | jq -r '.IsSynced // "unknown"' 2>/dev/null)"
   is_failed_raw="$(echo "$sync_json" | jq -r '.IsFailed // empty' 2>/dev/null)"
+
   if [[ "$is_failed_raw" == "true" ]]; then
     is_failed="true"
   else
     is_failed="false"
   fi
 
+  if [[ "$is_synced" == "true" && "$asset_name" == "MASTERNODE_SYNC_FINISHED" ]]; then
+    if [[ -z "${SYNC_READY_SINCE_EPOCH}" ]]; then
+      SYNC_READY_SINCE_EPOCH="$(date +%s)"
+    fi
+  fi
+
   echo
   echo "Sync Progress"
   echo "-------------"
   echo "Local block height: ${block_height:-unknown}"
-
   echo "Masternode sync stage: ${asset_name:-unknown}"
   echo "Blockchain synced: ${is_blockchain_synced:-unknown}"
   echo "Masternode synced: ${is_synced:-unknown}"
   echo "Sync failed: ${is_failed}"
+
+  if [[ -n "${SYNC_READY_SINCE_EPOCH}" ]]; then
+    now_ts="$(date +%s)"
+    ready_seconds=$((now_ts - SYNC_READY_SINCE_EPOCH))
+    echo "Fully synced for: ${ready_seconds} seconds"
+  fi
+
   echo
 
   if [[ "$is_synced" == "true" && "$asset_name" == "MASTERNODE_SYNC_FINISHED" ]]; then
@@ -1801,6 +1820,182 @@ show_sync_progress() {
   else
     warn "Your node is still syncing. Please wait before continuing."
   fi
+}
+
+get_protx_readiness_snapshot() {
+  local bc_json sync_json net_json peer_json tips_json
+
+  bc_json="$(run_cli getblockchaininfo 2>/dev/null || true)"
+  sync_json="$(run_cli mnsync status 2>/dev/null || true)"
+  net_json="$(run_cli getnetworkinfo 2>/dev/null || true)"
+  peer_json="$(run_cli getpeerinfo 2>/dev/null || true)"
+  tips_json="$(run_cli getchaintips 2>/dev/null || true)"
+
+  if [[ -z "$bc_json" ]]; then bc_json="{}"; fi
+  if [[ -z "$sync_json" ]]; then sync_json="{}"; fi
+  if [[ -z "$net_json" ]]; then net_json="{}"; fi
+  if [[ -z "$peer_json" ]]; then peer_json="[]"; fi
+  if [[ -z "$tips_json" ]]; then tips_json="[]"; fi
+
+  local blocks headers ibd
+  local asset_name is_blockchain_synced is_synced is_failed
+  local connections peer_count
+  local headers_only_count fork_count
+  local high_ping_count max_ping
+  local now_ts ready_seconds
+
+  blocks="$(echo "$bc_json" | jq -r '.blocks // "unknown"' 2>/dev/null)"
+  headers="$(echo "$bc_json" | jq -r '.headers // "unknown"' 2>/dev/null)"
+  ibd="$(echo "$bc_json" | jq -r '.initialblockdownload // "unknown"' 2>/dev/null)"
+
+  asset_name="$(echo "$sync_json" | jq -r '.AssetName // "unknown"' 2>/dev/null)"
+  is_blockchain_synced="$(echo "$sync_json" | jq -r '.IsBlockchainSynced // "unknown"' 2>/dev/null)"
+  is_synced="$(echo "$sync_json" | jq -r '.IsSynced // "unknown"' 2>/dev/null)"
+  is_failed="$(echo "$sync_json" | jq -r '.IsFailed // "unknown"' 2>/dev/null)"
+
+  connections="$(echo "$net_json" | jq -r '.connections // 0' 2>/dev/null)"
+  peer_count="$(echo "$peer_json" | jq 'length' 2>/dev/null || echo 0)"
+
+  headers_only_count="$(echo "$tips_json" | jq '[.[] | select((.status // "") == "headers-only")] | length' 2>/dev/null || echo 0)"
+  fork_count="$(echo "$tips_json" | jq '[.[] | select((.status // "") == "valid-fork" or (.status // "") == "valid-headers")] | length' 2>/dev/null || echo 0)"
+
+  high_ping_count="$(echo "$peer_json" | jq --argjson max_ping "${PROTX_MAX_PEER_PING}" '[.[] | select(((.pingtime // 999999) > $max_ping))] | length' 2>/dev/null || echo 0)"
+  max_ping="$(echo "$peer_json" | jq -r '[.[].pingtime // empty] | max // "n/a"' 2>/dev/null || echo "n/a")"
+
+  print_line
+  echo "ProTx readiness check"
+  echo "---------------------"
+  echo "Blocks                : ${blocks}"
+  echo "Headers               : ${headers}"
+  echo "Initial block download: ${ibd}"
+  echo "Sync stage            : ${asset_name}"
+  echo "Blockchain synced     : ${is_blockchain_synced}"
+  echo "Masternode synced     : ${is_synced}"
+  echo "Sync failed           : ${is_failed}"
+  echo "Connections           : ${connections}"
+  echo "Peers visible         : ${peer_count}"
+  echo "Headers-only tips     : ${headers_only_count}"
+  echo "Fork-like tips        : ${fork_count}"
+  echo "Peers with ping > ${PROTX_MAX_PEER_PING}s: ${high_ping_count}"
+  echo "Max peer ping         : ${max_ping}"
+
+  if [[ -n "${SYNC_READY_SINCE_EPOCH}" ]]; then
+    now_ts="$(date +%s)"
+    ready_seconds=$((now_ts - SYNC_READY_SINCE_EPOCH))
+    echo "Fully synced for      : ${ready_seconds} seconds"
+  else
+    ready_seconds=0
+    echo "Fully synced for      : not tracked yet"
+  fi
+
+  echo
+
+  local hard_fail=0
+
+  if [[ "${blocks}" != "${headers}" ]]; then
+    warn "Blocks and headers do not match yet."
+    hard_fail=1
+  fi
+
+  if [[ "${ibd}" != "false" ]]; then
+    warn "initialblockdownload is not false yet."
+    hard_fail=1
+  fi
+
+  if [[ "${asset_name}" != "MASTERNODE_SYNC_FINISHED" ]]; then
+    warn "Masternode sync stage is not MASTERNODE_SYNC_FINISHED yet."
+    hard_fail=1
+  fi
+
+  if [[ "${is_blockchain_synced}" != "true" ]]; then
+    warn "Blockchain synced is not true yet."
+    hard_fail=1
+  fi
+
+  if [[ "${is_synced}" != "true" ]]; then
+    warn "Masternode synced is not true yet."
+    hard_fail=1
+  fi
+
+  if [[ "${is_failed}" == "true" ]]; then
+    warn "Sync failed is true."
+    hard_fail=1
+  fi
+
+  if ! is_number "${connections}" || (( connections < PROTX_MIN_CONNECTIONS )); then
+    warn "Peer connectivity is still weaker than recommended."
+    hard_fail=1
+  fi
+
+  if ! is_number "${headers_only_count}" || (( headers_only_count > 0 )); then
+    warn "There are still headers-only chain tips."
+    hard_fail=1
+  fi
+
+  echo
+
+  if (( hard_fail > 0 )); then
+    warn "The timing for protx update_service is not ideal yet."
+    echo "Please wait a little longer and run the readiness check again."
+    return 1
+  fi
+
+  if [[ -n "${SYNC_READY_SINCE_EPOCH}" ]] && (( ready_seconds < PROTX_MIN_READY_SECONDS )); then
+    warn "The node looks technically ready, but it has only been fully synced for ${ready_seconds} seconds."
+    echo "It is recommended to wait a few more minutes for a more stable timing."
+    echo "You may still continue with 'x' if you want."
+    return 0
+  fi
+
+  success "The timing now looks good for protx update_service."
+  echo "You can continue with 'x' and the controller-wallet step."
+  return 0
+}
+
+interactive_protx_readiness_menu() {
+  local action
+
+  print_line
+  echo "The node is fully synced, but it can still be useful to wait a few more minutes"
+  echo "until connectivity and chain state look stable before running protx update_service."
+  echo
+  echo "Recommended way:"
+  echo " - Use 'r' repeatedly to run the readiness check again"
+  echo " - Wait until the result says the timing looks good"
+  echo " - You can skip this step any time with 'x'"
+  print_line
+  echo "ProTx readiness menu"
+  echo "Use the following keys:"
+  echo "  r = run readiness check"
+  echo "  l = show last 30 debug.log lines"
+  echo "  j = show last 30 journalctl lines for the service"
+  echo "  x = skip this step and continue"
+  print_line
+
+  while true; do
+    read -r -p "Choose action [r/l/j/x]: " action
+
+    case "${action}" in
+      r|R)
+        get_protx_readiness_snapshot
+        ;;
+      l|L)
+        tail -n 30 "${DEFAULT_DATA_DIR}/debug.log" || warn "Could not read debug.log."
+        ;;
+      j|J)
+        journalctl -u "${DEFAULT_SERVICE}" -n 30 --no-pager 2>/dev/null || warn "Could not read journalctl output."
+        ;;
+      x|X)
+        success "Leaving ProTx readiness menu and continuing."
+        break
+        ;;
+      *)
+        warn "Invalid selection."
+        ;;
+    esac
+
+    print_line
+  done
 }
 
 run_recovery_plain_mode() {
@@ -1828,6 +2023,7 @@ run_recovery_plain_mode() {
   restore_service_if_needed || exit 1
 
   interactive_monitoring_menu
+  interactive_protx_readiness_menu
   info "Showing final local status snapshot..."
   show_local_status
   show_protx_placeholder
@@ -1875,6 +2071,7 @@ run_recovery_addnodes_mode() {
 
   apply_prepared_pose_bans
   interactive_monitoring_menu
+  interactive_protx_readiness_menu
 
   info "Showing final local status snapshot..."
   show_local_status

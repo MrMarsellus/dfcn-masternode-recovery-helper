@@ -1976,6 +1976,10 @@ interactive_protx_readiness_menu() {
   echo "The node is fully synced, but it can still be useful to wait a few more minutes"
   echo "until connectivity and chain state look stable before running protx update_service."
   echo
+  echo "If the node was not PoSe-banned and you only performed a sync to bring it"
+  echo "up to the current block height, then no protx update_service is required."
+  echo "In this case you can skip the following protx step with 'x'."
+  echo
   echo "Recommended way:"
   echo " - Use 'r' repeatedly to run the readiness check again"
   echo " - Wait until the result says the timing looks good"

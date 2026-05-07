@@ -1953,6 +1953,14 @@ get_protx_readiness_snapshot() {
 
   if ! is_number "${headers_only_count}" || (( headers_only_count > 0 )); then
     warn "There are still headers-only chain tips."
+    info "If there is only 1 and all other values look good, you may still continue."
+    hard_fail=1
+  fi
+
+  if ! is_number "${fork_count}" || (( fork_count > 0 )); then
+    warn "There are still fork-like chain tips."
+    info "The node still sees alternative valid-looking chain branches."
+    info "Waiting is recommended until fork-like tips are 0 and the chain state looks stable."
     hard_fail=1
   fi
 
@@ -1968,6 +1976,7 @@ get_protx_readiness_snapshot() {
   if (( hard_fail > 0 )); then
     warn "The timing for protx update_service is not ideal yet."
     echo "Please wait a little longer and run the readiness check again."
+    info "If you do not want to wait any longer, you can still continue with 'x'."
     return 1
   fi
 

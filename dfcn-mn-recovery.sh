@@ -2050,6 +2050,103 @@ run_recovery_plain_mode() {
   show_protx_placeholder
 }
 
+wait_for_rpc() {
+  local max_attempts="${1:-30}"
+  local sleep_sec="${2:-5}"
+  local attempt=0
+
+  print_line
+  info "Waiting for RPC to become available after daemon start..."
+
+  while (( attempt < max_attempts )); do
+    attempt=$(( attempt + 1 ))
+    if timeout 5 "${DEFAULT_CLI}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" getblockcount >/dev/null 2>&1; then
+      success "RPC is responding (attempt ${attempt}/${max_attempts})."
+      return 0
+    fi
+    echo "  Attempt ${attempt}/${max_attempts}: RPC not yet available. Waiting ${sleep_sec}s..."
+    sleep "${sleep_sec}"
+  done
+
+  error "RPC did not become available after ${max_attempts} attempts."
+  return 1
+}
+
+stop_daemon_for_config_reload() {
+  print_line
+  info "Stopping daemon temporarily to apply the verified addnode config..."
+  echo "The daemon will be restarted immediately after the config is written."
+  print_line
+
+  if service_unit_exists; then
+    if systemctl is-enabled "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+      info "Service is enabled. Trying systemctl disable first to prevent auto-restart..."
+      if systemctl disable "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+        SERVICE_WAS_DISABLED=1
+        success "Service disabled temporarily."
+      else
+        warn "systemctl disable did not succeed."
+      fi
+      sleep 2
+    else
+      info "Service is already not enabled."
+    fi
+
+    info "Trying systemctl stop..."
+    systemctl stop "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl stop did not succeed."
+    sleep 8
+  else
+    warn "Service file ${DEFAULT_SERVICE}.service was not found. Skipping systemctl disable/stop."
+  fi
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    info "Trying RPC stop..."
+    run_cli stop >/dev/null 2>&1 || warn "RPC stop did not succeed."
+    sleep 10
+  fi
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    warn "Daemon is still running after service stop and RPC stop. Trying normal kill..."
+    pkill -f "${DEFAULT_DAEMON}" >/dev/null 2>&1 || warn "Normal kill did not succeed."
+    sleep 5
+  fi
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    warn "Daemon is still running after normal kill. Trying hard kill (kill -9)..."
+    pkill -9 -f "${DEFAULT_DAEMON}" >/dev/null 2>&1 || warn "Hard kill did not succeed."
+    sleep 3
+  fi
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    warn "Daemon is still running after hard kill."
+
+    if service_unit_exists; then
+      info "Trying systemctl mask to block all restarts..."
+      if systemctl mask "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+        SERVICE_WAS_MASKED=1
+        success "Service masked temporarily."
+      else
+        warn "systemctl mask did not succeed."
+      fi
+      systemctl stop "${DEFAULT_SERVICE}" >/dev/null 2>&1 || true
+      sleep 5
+    else
+      warn "Service masking is not possible because no service file was found."
+    fi
+  fi
+
+  show_stop_summary
+
+  if verify_daemon_stopped; then
+    success "Daemon stopped successfully for config reload."
+    return 0
+  fi
+
+  error "Safe stopped state was NOT confirmed for config reload."
+  warn "Aborting before writing config to avoid data corruption."
+  return 1
+}
+
 run_recovery_addnodes_mode() {
   info "Selected: Recovery with trusted addnodes."
   print_line
@@ -2057,38 +2154,93 @@ run_recovery_addnodes_mode() {
   echo "PoSe-based bans can optionally be prepared and will be applied after cleanup and restart."
   print_line
 
+  # ------------------------------------------------------------------
+  # PHASE 1 – Pre-stop preparation (daemon must be running for RPC)
+  # ------------------------------------------------------------------
+  print_line
+  info "Phase 1: Pre-stop preparation (RPC must be available)"
+  print_line
+
   prompt_addnodes_source
   validate_addnodes
   show_addnodes
   prompt_reference_height
-  prompt_addnode_check_mode
-  pick_random_candidates
-  check_addnode_candidates
   show_local_status
   check_service_and_process
   backup_conf
   offer_pose_banlist_preparation
 
+  # ------------------------------------------------------------------
+  # PHASE 2 – Stop daemon and perform resync cleanup
+  # ------------------------------------------------------------------
+  print_line
+  info "Phase 2: Stopping daemon and cleaning up local chain data"
+  print_line
+
   stop_daemon_cautious || {
-    error "Verified stopped state was not reached."
-    warn "Aborting before cleanup to avoid corruption."
+    error "Daemon stop was not confirmed. Aborting."
     exit 1
   }
 
   if ! verify_daemon_stopped; then
     error "Verified stopped state was not reached."
-    warn "Aborting before cleanup to avoid corruption."
+    warn "Aborting before cleanup to avoid data corruption."
     exit 1
   fi
 
   remove_lock_file
   cleanup_recovery_files
-  write_trusted_addnodes_to_conf
+
+  # ------------------------------------------------------------------
+  # PHASE 3 – First restart: sync on correct chain, then check addnodes
+  # ------------------------------------------------------------------
+  print_line
+  info "Phase 3: Starting daemon on clean chain for addnode verification"
+  echo "The daemon will now start without any managed addnodes."
+  echo "Once RPC is available, trusted addnode candidates will be verified."
+  print_line
 
   restore_service_if_needed || {
-    error "Final service start step failed."
+    error "Failed to start daemon for addnode verification."
     exit 1
   }
+
+  if ! wait_for_rpc 30 5; then
+    error "RPC did not become available after first restart."
+    echo "Check with: systemctl status ${DEFAULT_SERVICE}"
+    echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
+    exit 1
+  fi
+
+  prompt_addnode_check_mode
+  pick_random_candidates
+  check_addnode_candidates
+
+  # ------------------------------------------------------------------
+  # PHASE 4 – Write verified addnodes to config and restart
+  # ------------------------------------------------------------------
+  print_line
+  info "Phase 4: Writing verified addnodes to defcon.conf and restarting"
+  print_line
+
+  write_trusted_addnodes_to_conf
+
+  stop_daemon_for_config_reload || {
+    error "Could not stop daemon for config reload. Aborting."
+    exit 1
+  }
+
+  restore_service_if_needed || {
+    error "Final service start with addnode config failed."
+    exit 1
+  }
+
+  # ------------------------------------------------------------------
+  # PHASE 5 – Post-restart: apply PoSe bans and monitoring
+  # ------------------------------------------------------------------
+  print_line
+  info "Phase 5: Applying PoSe bans and opening sync monitoring"
+  print_line
 
   apply_prepared_pose_bans
   interactive_monitoring_menu

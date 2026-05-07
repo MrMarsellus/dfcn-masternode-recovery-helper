@@ -1983,7 +1983,7 @@ get_protx_readiness_snapshot() {
     echo
     info "If the situation does not improve over time (for example fork-like tips"
     info "or headers-only tips stay present, or the local view differs from a"
-    info "trusted explorer), it can be safer to run this recovery helper again."
+    info "trusted explorer), it can be safer to run this recovery helper again with 'n'."
     return 1
   fi
 

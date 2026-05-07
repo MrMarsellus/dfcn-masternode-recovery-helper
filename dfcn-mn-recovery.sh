@@ -1976,12 +1976,17 @@ get_protx_readiness_snapshot() {
   if (( hard_fail > 0 )); then
     warn "The timing for protx update_service is not ideal yet."
     echo "Please wait a little longer and run the readiness check again."
+    echo
     info "If you do not want to wait any longer, you can still continue with 'x'."
+    echo
+    info "If the situation does not improve over time (for example fork-like tips"
+    info "or headers-only tips stay present, or the local view differs from a"
+    info "trusted explorer), it can be safer to run this recovery helper again."
     return 1
   fi
 
   if [[ -n "${SYNC_READY_SINCE_EPOCH}" ]] && (( ready_seconds < PROTX_MIN_READY_SECONDS )); then
-    warn "The node looks technically ready, but it has only been fully synced for ${ready_seconds} seconds."
+    warn "The node is fully synced, but only for ${ready_seconds} seconds."
     echo "It is recommended to wait a few more minutes for a more stable timing."
     echo "You may still continue with 'x' if you want."
     return 0

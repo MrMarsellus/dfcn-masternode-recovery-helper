@@ -11,6 +11,7 @@ Cautious recovery helper for DeFCoN masternodes with optional trusted addnodes a
 - Trusted addnodes:
   - Loaded from `trusted_addnodes.txt`
   - Randomized candidate selection and connectivity checks
+  - Addnode verification runs **after** resync cleanup on a clean chain to ensure reliable results
   - Writes verified addnodes into a clearly marked block in `defcon.conf`
 - Recovery safety:
   - Cautious daemon stop (systemd + RPC + optional kill) with stop verification
@@ -104,22 +105,46 @@ In this mode, no `addnode=` entries are created or modified and no PoSe-based te
 
 Goal: like mode 1, but with a curated trusted addnode list and optional PoSe-based banlist preparation.
 
-On top of mode 1:
+This mode uses a **two-phase restart** to ensure that addnode candidates are verified against a node that is already on the correct chain — not against a potentially stuck or forked local node.
 
-1. In this mode you can either use a prefilled `trusted_addnodes.txt` file or enter trusted addnodes manually when prompted.
-2. Random candidate selection, port checks and peer checks using `addnode ... onetry` + `getpeerinfo`.
-3. Optional hard/soft mode for addnode checks (multiple rounds, minimum number of successful checks).
-4. Show good vs. rejected addnodes.
-5. On confirmation: write a clearly separated helper block with verified addnodes into `defcon.conf`.
-6. Carefully stop daemon/service, verify the stop, optionally remove lockfile and delete selected recovery targets, then restart (as in mode 1).
-7. Optional PoSe feature:
-   - Live evaluation via `protx list registered true` and display of problematic masternodes
-   - On confirmation: write `recovery_pose_bans.txt` (state `prepared`) and apply bans after restart using `setban` (state `applied`)
-8. Open the interactive sync monitoring menu until full sync is reached.
-9. Open the interactive ProTx readiness menu to re-check chain and peer quality before `protx update_service`.
-10. Show the controller-wallet hint for `protx update_service`.
+Detailed flow:
 
-This mode is intended for nodes that benefit from a curated peer set during recovery.
+**Phase 1 – Pre-stop preparation (RPC available)**
+
+1. Select trusted addnode source: prefilled `trusted_addnodes.txt` or manual entry via nano editor.
+2. Enter the reference block height of the correct chain (from explorer or a trusted node).
+3. Show current local status and service state.
+4. Create a backup of `defcon.conf`.
+5. Optional PoSe feature: evaluate live deterministic masternode state via `protx list registered true` and optionally prepare a temporary PoSe-based banlist.
+
+**Phase 2 – Stop and resync cleanup**
+
+6. Carefully stop daemon/service and verify that it is really stopped.
+7. Optionally remove the lockfile and delete selected recovery targets (resync cleanup).
+
+**Phase 3 – First restart and addnode verification**
+
+8. Start the daemon on the clean, resyncing chain (without managed addnodes).
+9. Wait for RPC to become available.
+10. Select addnode check mode (soft or hard).
+11. Random candidate selection, port checks and peer checks using `addnode ... onetry` + `getpeerinfo`.
+12. Optional hard/soft mode for addnode checks (multiple rounds, minimum number of successful checks).
+13. Show good vs. rejected addnodes.
+
+**Phase 4 – Write config and final restart**
+
+14. On confirmation: write a clearly separated helper block with verified addnodes into `defcon.conf`.
+15. Stop the daemon again (silent config-reload stop, same reliability as the cautious stop).
+16. Start the daemon with the verified addnode configuration active.
+
+**Phase 5 – Post-restart**
+
+17. If a PoSe banlist was prepared: apply temporary bans via `setban` after restart.
+18. Open the interactive sync monitoring menu until full sync is reached.
+19. Open the interactive ProTx readiness menu to re-check chain and peer quality before `protx update_service`.
+20. Show the controller-wallet hint for `protx update_service`.
+
+This mode is intended for nodes that benefit from a curated peer set during recovery, and especially for nodes that were stuck on a wrong fork where pre-stop addnode checks would produce unreliable results.
 
 ## Mode 3 – Restore normal mode
 
@@ -154,7 +179,7 @@ Commands:
 - `s` – `mnsync status`
 - `p` – summarized view (block height, sync stage, sync flags)
 - `l` – last 30 lines of `debug.log`
-- `x` – “node is fully synchronized, continue to the next step”
+- `x` – "node is fully synchronized, continue to the next step"
 
 Before using `x`, the node should meet all of the following conditions:
 

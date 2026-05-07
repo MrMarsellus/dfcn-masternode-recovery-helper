@@ -45,6 +45,8 @@ PROTX_MAX_PEER_PING=2
 PROTX_MIN_READY_SECONDS=900
 PROTX_MAX_TIP_AGE=900
 
+ORIGINAL_ARGS=("$@")
+
 print_line() {
   echo "------------------------------------------------------------"
 }
@@ -2018,11 +2020,12 @@ interactive_protx_readiness_menu() {
   echo "  r = run readiness check"
   echo "  l = show last 30 debug.log lines"
   echo "  j = show last 30 journalctl lines for the service"
+  echo "  n = abort here and restart the recovery helper from the beginning"
   echo "  x = skip this step and continue"
   print_line
 
   while true; do
-    read -r -p "Choose action [r/l/j/x]: " action
+    read -r -p "Choose action [r/l/j/n/x]: " action
 
     case "${action}" in
       r|R)
@@ -2033,6 +2036,17 @@ interactive_protx_readiness_menu() {
         ;;
       j|J)
         journalctl -u "${DEFAULT_SERVICE}" -n 30 --no-pager 2>/dev/null || warn "Could not read journalctl output."
+        ;;
+      n|N)
+        if ask_yes_no "Do you really want to abort here and restart the recovery helper from the beginning?"; then
+          warn "Aborting here and restarting the recovery helper from the beginning."
+          echo "The script will now restart."
+          exec "$0" "${ORIGINAL_ARGS[@]}"
+          error "Automatic restart failed."
+          exit 1
+        else
+          warn "Restart aborted. Staying in the ProTx readiness menu."
+        fi
         ;;
       x|X)
         success "Leaving ProTx readiness menu and continuing."

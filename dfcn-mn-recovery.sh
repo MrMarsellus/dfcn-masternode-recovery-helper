@@ -2240,7 +2240,6 @@ run_recovery_addnodes_mode() {
 
     # ------------------------------------------------------------------
     print_line
-    info "Waiting for RPC to become available after daemon start..."
     wait_for_rpc 60 5 || { error "RPC did not respond. Aborting."; exit 1; }
     print_line
 

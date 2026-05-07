@@ -204,8 +204,16 @@ prompt_reference_height() {
   input="$(trim "${input:-}")"
 
   if [[ -z "$input" ]]; then
+    warn "WARNING: Your node may be on the wrong fork."
+    warn "The local block height (${local_height}) may be INCORRECT."
+    warn "It is strongly recommended to enter the reference height from the official explorer."
+    echo
+    if ! ask_yes_no "Are you sure you want to use the local block height ${local_height} as reference?"; then
+        error "Please restart and enter the correct reference height manually."
+        exit 1
+    fi
     REFERENCE_HEIGHT="$local_height"
-    info "No value entered. Using local block height as reference: ${REFERENCE_HEIGHT}"
+    info "Using local block height as reference: ${REFERENCE_HEIGHT}"
   else
     if ! is_number "$input"; then
       error "Invalid block height. Please enter a numeric value."
@@ -2082,7 +2090,7 @@ stop_daemon_for_config_reload() {
     if systemctl is-enabled "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
       info "Service is enabled. Trying systemctl disable first to prevent auto-restart..."
       if systemctl disable "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
-        SERVICE_WAS_DISABLED=1
+        [ "${SERVICE_WAS_DISABLED}" -eq 0 ] && SERVICE_WAS_DISABLED=1
         success "Service disabled temporarily."
       else
         warn "systemctl disable did not succeed."
@@ -2123,7 +2131,7 @@ stop_daemon_for_config_reload() {
     if service_unit_exists; then
       info "Trying systemctl mask to block all restarts..."
       if systemctl mask "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
-        SERVICE_WAS_MASKED=1
+        [ "${SERVICE_WAS_MASKED}" -eq 0 ] && SERVICE_WAS_MASKED=1
         success "Service masked temporarily."
       else
         warn "systemctl mask did not succeed."
@@ -2148,107 +2156,118 @@ stop_daemon_for_config_reload() {
 }
 
 run_recovery_addnodes_mode() {
-  info "Selected: Recovery with trusted addnodes."
-  print_line
-  echo "This mode performs a cautious recovery AND manages a helper-controlled trusted addnode list in defcon.conf."
-  echo "PoSe-based bans can optionally be prepared and will be applied after cleanup and restart."
-  print_line
+    info "Selected: Recovery with trusted addnodes."
+    print_line
+    echo "This mode performs a cautious recovery AND manages a helper-controlled trusted addnode list in defcon.conf."
+    echo "PoSe-based bans can optionally be prepared and will be applied after cleanup and restart."
+    print_line
 
-  # ------------------------------------------------------------------
-  # PHASE 1 – Pre-stop preparation (daemon must be running for RPC)
-  # ------------------------------------------------------------------
-  print_line
-  info "Phase 1: Pre-stop preparation (RPC must be available)"
-  print_line
+    # ------------------------------------------------------------------
+    print_line
+    info "Phase 1 – Pre-stop preparation (RPC must be available)"
+    print_line
 
-  prompt_addnodes_source
-  validate_addnodes
-  show_addnodes
-  prompt_reference_height
-  show_local_status
-  check_service_and_process
-  backup_conf
-  offer_pose_banlist_preparation
+    prompt_addnodes_source
+    validate_addnodes
+    show_addnodes
+    prompt_reference_height
+    show_local_status
+    check_service_and_process
+    backup_conf
+    offer_pose_banlist_preparation
 
-  # ------------------------------------------------------------------
-  # PHASE 2 – Stop daemon and perform resync cleanup
-  # ------------------------------------------------------------------
-  print_line
-  info "Phase 2: Stopping daemon and cleaning up local chain data"
-  print_line
+    # ------------------------------------------------------------------
+    print_line
+    info "Phase 2 – Stopping daemon and cleaning up local chain data"
+    print_line
 
-  stop_daemon_cautious || {
-    error "Daemon stop was not confirmed. Aborting."
-    exit 1
-  }
+    stop_daemon_cautious || { error "Daemon stop was not confirmed. Aborting."; exit 1; }
 
-  if ! verify_daemon_stopped; then
-    error "Verified stopped state was not reached."
-    warn "Aborting before cleanup to avoid data corruption."
-    exit 1
-  fi
+    if ! verify_daemon_stopped; then
+        error "Verified stopped state was not reached."
+        warn "Aborting before cleanup to avoid data corruption."
+        exit 1
+    fi
 
-  remove_lock_file
-  cleanup_recovery_files
+    remove_lock_file
+    cleanup_recovery_files
 
-  # ------------------------------------------------------------------
-  # PHASE 3 – First restart: sync on correct chain, then check addnodes
-  # ------------------------------------------------------------------
-  print_line
-  info "Phase 3: Starting daemon on clean chain for addnode verification"
-  echo "The daemon will now start without any managed addnodes."
-  echo "Once RPC is available, trusted addnode candidates will be verified."
-  print_line
+    # ------------------------------------------------------------------
+    print_line
+    info "Phase 3 – Starting daemon on clean chain for addnode verification..."
+    echo "The daemon will now start without any managed addnodes."
+    echo "It must reach full sync before trusted addnode candidates can be"
+    echo "verified reliably. Please monitor the sync progress and continue"
+    echo "with 'x' only when the node is fully synced."
+    print_line
 
-  restore_service_if_needed || {
-    error "Failed to start daemon for addnode verification."
-    exit 1
-  }
+    restore_service_if_needed || { error "Final service start failed."; exit 1; }
+    check_service_and_process
 
-  if ! wait_for_rpc 30 5; then
-    error "RPC did not become available after first restart."
-    echo "Check with: systemctl status ${DEFAULT_SERVICE}"
-    echo "        and: journalctl -u ${DEFAULT_SERVICE} -n 50"
-    exit 1
-  fi
+    # ------------------------------------------------------------------
+    print_line
+    info "Waiting for RPC to become available after daemon start..."
+    wait_for_rpc 60 5 || { error "RPC did not respond. Aborting."; exit 1; }
+    print_line
 
-  prompt_addnode_check_mode
-  pick_random_candidates
-  check_addnode_candidates
+    # ------------------------------------------------------------------
+    print_line
+    info "Phase 4 – Waiting for full sync before addnode verification"
+    print_line
+    echo "The node is syncing on a clean chain. Addnode candidates can only"
+    echo "be verified reliably once the node has fully synchronized."
+    echo ""
+    echo "Please use the sync monitoring menu below to track the sync progress."
+    echo "Continue with 'x' ONLY when all of the following conditions are met:"
+    echo ""
+    echo "  - Local block height ≈ reference height ($REFERENCE_HEIGHT)"
+    echo "  - Sync stage:          MASTERNODE_SYNC_FINISHED"
+    echo "  - Blockchain synced:   true"
+    echo "  - Masternode synced:   true"
+    echo ""
+    echo "Do NOT continue with 'x' while the sync stage is still"
+    echo "MASTERNODE_SYNC_BLOCKCHAIN or any earlier stage."
+    print_line
 
-  # ------------------------------------------------------------------
-  # PHASE 4 – Write verified addnodes to config and restart
-  # ------------------------------------------------------------------
-  print_line
-  info "Phase 4: Writing verified addnodes to defcon.conf and restarting"
-  print_line
+    interactive_monitoring_menu
 
-  write_trusted_addnodes_to_conf
+    # ------------------------------------------------------------------
+    # Select addnode check mode, pick candidates, run verification
+    prompt_addnode_check_mode
+    pick_random_candidates
+    check_addnode_candidates
 
-  stop_daemon_for_config_reload || {
-    error "Could not stop daemon for config reload. Aborting."
-    exit 1
-  }
+    if [[ ${#GOOD_ADDNODES[@]} -eq 0 ]]; then
+        error "No trusted addnodes passed the verification. Cannot continue."
+        echo "Options:"
+        echo "  - Try again later when more peers are available."
+        echo "  - Check your trusted_addnodes.txt for valid entries."
+        exit 1
+    fi
 
-  restore_service_if_needed || {
-    error "Final service start with addnode config failed."
-    exit 1
-  }
+    # ------------------------------------------------------------------
+    print_line
+    info "Phase 5 – Writing verified addnodes to defcon.conf and restarting"
+    print_line
 
-  # ------------------------------------------------------------------
-  # PHASE 5 – Post-restart: apply PoSe bans and monitoring
-  # ------------------------------------------------------------------
-  print_line
-  info "Phase 5: Applying PoSe bans and opening sync monitoring"
-  print_line
+    write_trusted_addnodes_to_conf
 
-  apply_prepared_pose_bans
-  interactive_monitoring_menu
-  interactive_protx_readiness_menu
+    stop_daemon_for_config_reload || { error "Could not stop daemon for config reload. Aborting."; exit 1; }
 
-  info "Showing final local status snapshot..."
-  show_local_status
-  show_protx_placeholder
+    restore_service_if_needed || { error "Final service start with addnode config failed."; exit 1; }
+
+    # ------------------------------------------------------------------
+    print_line
+    info "Phase 6 – Applying PoSe bans and opening sync monitoring"
+    print_line
+
+    apply_prepared_pose_bans
+    interactive_monitoring_menu
+    interactive_protx_readiness_menu
+
+    info "Showing final local status snapshot..."
+    show_local_status
+    show_protx_placeholder
 }
 
 check_ready_for_restore() {

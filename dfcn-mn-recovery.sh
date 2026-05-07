@@ -1732,15 +1732,21 @@ show_protx_placeholder() {
 }
 
 interactive_monitoring_menu() {
-  print_line
-  echo "The node must now fully synchronize before you continue."
-  echo "Use the following menu options to monitor sync progress."
-  echo "Only continue with x when all of the following are true:"
-  echo "  - Local block height matches the reference block height"
-  echo "  - Masternode sync stage is 'MASTERNODE_SYNC_FINISHED'"
-  echo "  - 'Blockchain synced' is true"
-  echo "  - 'Masternode synced' is true"
-  print_line
+  local skip_intro=0
+  [[ "${1:-}" == "--no-intro" ]] && skip_intro=1
+
+  if [[ "$skip_intro" -eq 0 ]]; then
+    print_line
+    echo "The node must now fully synchronize before you continue."
+    echo "Use the following menu options to monitor sync progress."
+    echo "Only continue with x when all of the following are true:"
+    echo "  - Local block height matches the reference block height"
+    echo "  - Masternode sync stage is 'MASTERNODE_SYNC_FINISHED'"
+    echo "  - 'Blockchain synced' is true"
+    echo "  - 'Masternode synced' is true"
+    print_line
+  fi
+
   echo "Interactive monitoring menu"
   echo "Use the following keys:"
   echo "  g = get block height"
@@ -2229,7 +2235,7 @@ run_recovery_addnodes_mode() {
     echo "MASTERNODE_SYNC_BLOCKCHAIN or any earlier stage."
     print_line
 
-    interactive_monitoring_menu
+    interactive_monitoring_menu --no-intro
 
     # ------------------------------------------------------------------
     # Select addnode check mode, pick candidates, run verification

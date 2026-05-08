@@ -47,6 +47,10 @@ PROTX_MAX_TIP_AGE=900
 
 ORIGINAL_ARGS=("$@")
 
+EARLY_BOOTSTRAP_TARGET_COUNT=5
+EARLY_BOOTSTRAP_MAX_CANDIDATES=25
+EARLY_BOOTSTRAP_FILE="${DEFAULT_DATA_DIR}/early_bootstrap_nodes.txt"
+
 print_line() {
   echo "------------------------------------------------------------"
 }
@@ -162,6 +166,21 @@ dedupe_good_addnodes_array() {
   GOOD_ADDNODES=("${result[@]}")
 }
 
+dedupe_early_bootstrap_array() {
+  local -A seen=()
+  local -a result=()
+  local item
+
+  for item in "${EARLY_BOOTSTRAP_NODES[@]}"; do
+    if [[ -n "${item}" && -z "${seen[$item]:-}" ]]; then
+      seen["$item"]=1
+      result+=("$item")
+    fi
+  done
+
+  EARLY_BOOTSTRAP_NODES=("${result[@]}")
+}
+
 normalize_node() {
   local node="$1"
   if [[ "$node" != *:* ]]; then
@@ -169,6 +188,263 @@ normalize_node() {
   else
     echo "$node"
   fi
+}
+
+test_node_early_bootstrap() {
+  local node="$1"
+  local host port peer_json peer_height
+
+  if ! is_number "${REFERENCE_HEIGHT}" || (( REFERENCE_HEIGHT == 0 )); then
+    warn "Early bootstrap skipped: REFERENCE_HEIGHT is not set or invalid."
+    return 1
+  fi
+
+  host="${node%:*}"
+  port="${node##*:}"
+
+  info "Early bootstrap test for ${node}"
+
+  if ! timeout "${ADDNODE_TCP_TIMEOUT}" bash -c "echo > /dev/tcp/${host}/${port}" 2>/dev/null; then
+    warn "Early bootstrap port check failed for ${node}"
+    return 1
+  fi
+
+  run_cli addnode "${node}" onetry >/dev/null 2>&1 || true
+  sleep "${ADDNODE_PEER_SLEEP}"
+
+  peer_json="$(get_peer_json_by_host "$host" 2>/dev/null || true)"
+  if [[ -z "${peer_json}" ]]; then
+    warn "Early bootstrap peer check failed for ${node} (not visible in getpeerinfo)"
+    return 1
+  fi
+
+  peer_height="$(jq -r '.synced_headers // .startingheight // .synced_blocks // empty' <<< "${peer_json}" 2>/dev/null || true)"
+
+  # Erst: ist peer_height überhaupt eine gültige Zahl > 0?
+  if ! is_number "${peer_height}" || (( peer_height == 0 )); then
+    warn "Early bootstrap rejected: ${node} (peer height is 0 or unknown)"
+    return 1
+  fi
+
+  echo "  Early peer height : ${peer_height}"
+  echo "  Reference height  : ${REFERENCE_HEIGHT}"
+
+  # Dann: Height-Diff-Check
+  if (( peer_height + ADDNODE_MAX_HEIGHT_DIFF < REFERENCE_HEIGHT )); then
+    warn "Early bootstrap rejected: ${node} (peer height ${peer_height} too far behind reference ${REFERENCE_HEIGHT})"
+    return 1
+  fi
+
+  success "Early bootstrap candidate accepted: ${node}"
+  return 0
+}
+
+pick_random_early_bootstrap_candidates() {
+  EARLY_BOOTSTRAP_CANDIDATES=()
+
+  check_addnode_file
+  load_addnodes
+  dedupe_addnodes_array
+  validate_addnodes
+
+  mapfile -t EARLY_BOOTSTRAP_CANDIDATES < <(
+    printf '%s\n' "${ADDNODES[@]}" | shuf | head -n "${EARLY_BOOTSTRAP_MAX_CANDIDATES}"
+  )
+
+  if [[ "${#EARLY_BOOTSTRAP_CANDIDATES[@]}" -eq 0 ]]; then
+    warn "No early bootstrap candidates were selected."
+    return 1
+  fi
+
+  print_line
+  info "Random early bootstrap candidates selected:"
+  for node in "${EARLY_BOOTSTRAP_CANDIDATES[@]}"; do
+    echo "  - ${node}"
+  done
+  print_line
+
+  return 0
+}
+
+write_early_bootstrap_file() {
+  local tmp_file
+  tmp_file="${EARLY_BOOTSTRAP_FILE}.tmp"
+
+  {
+    echo "# DeFCoN Recovery Helper early bootstrap nodes"
+    echo "# Created: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+    echo "# Reference height: ${REFERENCE_HEIGHT}"
+    echo "# Temporary file for bootstrap only"
+    echo "# Do not treat this as the final verified recovery addnode set"
+    printf '%s\n' "${EARLY_BOOTSTRAP_NODES[@]}"
+  } > "${tmp_file}"
+
+  mv "${tmp_file}" "${EARLY_BOOTSTRAP_FILE}"
+  chmod 600 "${EARLY_BOOTSTRAP_FILE}" >/dev/null 2>&1 || true
+}
+
+load_early_bootstrap_file() {
+  EARLY_BOOTSTRAP_NODES=()
+
+  if [[ ! -f "${EARLY_BOOTSTRAP_FILE}" ]]; then
+    return 1
+  fi
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="$(trim "$line")"
+
+    if [[ -n "${line}" ]]; then
+      line="$(awk '{print $1}' <<< "${line}")"
+      line="$(normalize_node "${line}")"
+      if echo "${line}" | grep -Eq '^[A-Za-z0-9._-]+:[0-9]+$'; then
+        EARLY_BOOTSTRAP_NODES+=("${line}")
+      fi
+    fi
+  done < "${EARLY_BOOTSTRAP_FILE}"
+
+  dedupe_early_bootstrap_array
+
+  [[ "${#EARLY_BOOTSTRAP_NODES[@]}" -gt 0 ]]
+}
+
+apply_early_bootstrap_nodes() {
+  local node applied_count=0
+
+  if [[ "${#EARLY_BOOTSTRAP_NODES[@]}" -eq 0 ]]; then
+    warn "No early bootstrap nodes are available to apply."
+    return 1
+  fi
+
+  print_line
+  info "Applying temporary early bootstrap nodes..."
+
+  for node in "${EARLY_BOOTSTRAP_NODES[@]}"; do
+    if run_cli addnode "${node}" onetry >/dev/null 2>&1; then
+      applied_count=$((applied_count + 1))
+      echo "  applied: ${node}"
+    else
+      warn "Could not apply early bootstrap addnode: ${node}"
+    fi
+  done
+
+  print_line
+  echo "Early bootstrap apply summary:"
+  echo " - Target count     : ${EARLY_BOOTSTRAP_TARGET_COUNT}"
+  echo " - Selected good    : ${#EARLY_BOOTSTRAP_NODES[@]}"
+  echo " - Applied via RPC  : ${applied_count}"
+  print_line
+
+  return 0
+}
+
+prepare_early_bootstrap_nodes() {
+  local node
+  local mode="${1:-interactive}"
+
+  EARLY_BOOTSTRAP_NODES=()
+  EARLY_BOOTSTRAP_CANDIDATES=()
+
+  rm -f "${EARLY_BOOTSTRAP_FILE}" >/dev/null 2>&1 || true
+
+  print_line
+  echo "Temporary early bootstrap addnode step"
+  echo
+  echo "This step tries to build a temporary bootstrap list from"
+  echo "a random subset of trusted_addnodes.txt."
+  echo
+  echo "Purpose:"
+  echo " - help the node connect if normal seed nodes are unavailable"
+  echo " - help sync get started so block height can move again"
+  echo " - improve the basis for later recovery checks"
+  echo
+  echo "Important:"
+  echo " - this is only a temporary bootstrap list"
+  echo " - it is separate from the later full addnode verification in mode 2"
+  print_line
+
+  if [[ "${mode}" != "non_interactive" ]]; then
+    if ! ask_yes_no "Do you want to run the temporary early bootstrap addnode step now?"; then
+      warn "Early bootstrap addnode step skipped by user."
+      return 0
+    fi
+  else
+    info "Running temporary early bootstrap addnode step in non-interactive mode."
+  fi
+
+  if ! pick_random_early_bootstrap_candidates; then
+    warn "Early bootstrap candidate preparation failed."
+    return 0
+  fi
+
+  for node in "${EARLY_BOOTSTRAP_CANDIDATES[@]}"; do
+    if test_node_early_bootstrap "${node}"; then
+      EARLY_BOOTSTRAP_NODES+=("${node}")
+      dedupe_early_bootstrap_array
+
+      if [[ "${#EARLY_BOOTSTRAP_NODES[@]}" -ge "${EARLY_BOOTSTRAP_TARGET_COUNT}" ]]; then
+        break
+      fi
+    fi
+
+    print_line
+  done
+
+  if [[ "${#EARLY_BOOTSTRAP_NODES[@]}" -eq 0 ]]; then
+    warn "No early bootstrap nodes passed the temporary checks."
+    rm -f "${EARLY_BOOTSTRAP_FILE}" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  print_line
+  echo "Temporary early bootstrap nodes selected:"
+  for node in "${EARLY_BOOTSTRAP_NODES[@]}"; do
+    echo "  - ${node}"
+  done
+  print_line
+
+  write_early_bootstrap_file
+  success "Temporary early bootstrap node file created: ${EARLY_BOOTSTRAP_FILE}"
+}
+
+maybe_apply_early_bootstrap_fallback() {
+  local net_json connections peer_count
+  local wait_seconds=15
+
+  print_line
+  info "Checking whether temporary early bootstrap fallback is needed..."
+
+  sleep "${wait_seconds}"
+
+  net_json="$(run_cli getnetworkinfo 2>/dev/null || true)"
+  connections="$(jq -r '.connections // 0' <<< "${net_json}" 2>/dev/null || echo 0)"
+  peer_count="$(run_cli getpeerinfo 2>/dev/null | jq 'length' 2>/dev/null || echo 0)"
+
+  echo "Current network state after startup wait:"
+  echo " - connections : ${connections}"
+  echo " - peer count  : ${peer_count}"
+  print_line
+
+  if [[ "${connections}" -ge 1 || "${peer_count}" -ge 1 ]]; then
+    success "Normal peer discovery appears to be working. Early bootstrap fallback is not needed."
+    return 0
+  fi
+
+  warn "No usable peer connections detected after startup wait."
+  warn "Trying temporary early bootstrap fallback list now..."
+
+  if [[ ! -f "${EARLY_BOOTSTRAP_FILE}" ]]; then
+    warn "No temporary early bootstrap file is available yet."
+    info "Trying to create a temporary early bootstrap file now..."
+    prepare_early_bootstrap_nodes "non_interactive"
+  fi
+
+  if ! load_early_bootstrap_file; then
+    warn "No temporary early bootstrap file is available."
+    return 0
+  fi
+
+  apply_early_bootstrap_nodes
 }
 
 get_local_height() {
@@ -719,6 +995,7 @@ choose_mode() {
       exit 1
       ;;
   esac
+  
 }
 
 pick_random_candidates() {
@@ -2071,6 +2348,7 @@ run_recovery_plain_mode() {
   show_local_status
   check_service_and_process
   backup_conf
+  prompt_reference_height
 
   stop_daemon_cautious || exit 1
 
@@ -2084,6 +2362,26 @@ run_recovery_plain_mode() {
   cleanup_recovery_files
 
   restore_service_if_needed || exit 1
+
+  print_line
+  info "Phase – Temporary early bootstrap addnode check"
+  print_line
+  echo "The daemon is running but not yet fully synced."
+  echo "This optional step tests a random subset of trusted addnodes for"
+  echo "basic reachability and sends them via 'addnode onetry' to help"
+  echo "the daemon find peers — especially if seed nodes are unreachable."
+  print_line
+
+  if wait_for_rpc 60 5; then
+    if [[ ! -f "${DEFAULT_ADDNODE_FILE}" ]]; then
+      warn "trusted_addnodes.txt was not found. Early bootstrap addnode step skipped."
+    else
+      prepare_early_bootstrap_nodes
+      maybe_apply_early_bootstrap_fallback
+    fi
+  else
+    warn "RPC did not respond in time. Early bootstrap addnode step skipped."
+  fi
 
   interactive_monitoring_menu
   interactive_protx_readiness_menu
@@ -2240,8 +2538,24 @@ run_recovery_addnodes_mode() {
 
     # ------------------------------------------------------------------
     print_line
-    wait_for_rpc 60 5 || { error "RPC did not respond. Aborting."; exit 1; }
+    info "Phase – Temporary early bootstrap addnode check"
     print_line
+    echo "The daemon is running but not yet fully synced."
+    echo "This optional step tests a random subset of trusted addnodes for"
+    echo "basic reachability and sends them via 'addnode onetry' to help"
+    echo "the daemon find peers — especially if seed nodes are unreachable."
+    print_line
+  
+    if wait_for_rpc 60 5; then
+      if [[ ! -f "${DEFAULT_ADDNODE_FILE}" ]]; then
+        warn "trusted_addnodes.txt was not found. Early bootstrap addnode step skipped."
+      else
+        prepare_early_bootstrap_nodes
+        maybe_apply_early_bootstrap_fallback
+      fi
+    else
+      warn "RPC did not respond in time. Early bootstrap addnode step skipped."
+    fi
 
     # ------------------------------------------------------------------
     print_line
@@ -2388,8 +2702,19 @@ run_restore_mode() {
   restore_normal_mode_conf
 
   restore_service_if_needed || exit 1
-
+  wait_for_rpc 30 5 || warn "RPC not yet available; PoSe ban removal may fail."
+  
   remove_tracked_pose_bans
+
+  if [[ -f "${EARLY_BOOTSTRAP_FILE}" ]]; then
+    if rm -f "${EARLY_BOOTSTRAP_FILE}" >/dev/null 2>&1; then
+      success "Temporary early bootstrap file removed: ${EARLY_BOOTSTRAP_FILE}"
+    else
+      warn "Could not remove temporary early bootstrap file: ${EARLY_BOOTSTRAP_FILE}"
+    fi
+  else
+    info "No temporary early bootstrap file found."
+  fi
 
   info "Showing final local status snapshot..."
   show_local_status

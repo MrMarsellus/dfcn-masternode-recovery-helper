@@ -13,6 +13,9 @@ Cautious recovery helper for DeFCoN masternodes with optional trusted addnodes a
   - Randomized candidate selection and connectivity checks
   - Addnode verification runs **after** resync cleanup on a clean chain to ensure reliable results
   - Writes verified addnodes into a clearly marked block in `defcon.conf`
+- Early bootstrap support:
+  - Optional temporary early bootstrap addnode list built from `trusted_addnodes.txt`
+  - Used automatically as a fallback if normal peer discovery fails after restart, and cleaned up again in restore mode
 - Recovery safety:
   - Cautious daemon stop (systemd + RPC + optional kill) with stop verification
   - Optional disable/mask of the service to prevent unwanted auto-restarts

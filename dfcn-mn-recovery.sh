@@ -2,7 +2,7 @@
 
 set -u
 
-SCRIPT_VERSION="0.4.6"
+SCRIPT_VERSION="0.4.7-step2"
 
 DEFAULT_DEFCON_USER="defcon"
 DEFAULT_DEFCON_HOME="/home/defcon"
@@ -44,6 +44,11 @@ PROTX_MIN_CONNECTIONS=6
 PROTX_MAX_PEER_PING=2
 PROTX_MIN_READY_SECONDS=900
 PROTX_MAX_TIP_AGE=900
+
+FORK_TIPS_SINCE=""
+HEADERS_TIPS_SINCE=""
+FORK_TIPS_WARN_THRESHOLD=1200      # 20 minutes
+HEADERS_TIPS_WARN_THRESHOLD=1200   # 20 minutes
 
 ORIGINAL_ARGS=("$@")
 
@@ -374,6 +379,9 @@ prepare_early_bootstrap_nodes() {
 
   if ! pick_random_early_bootstrap_candidates; then
     warn "Early bootstrap candidate preparation failed."
+    if [[ "${mode}" == "non_interactive" ]]; then
+      return 1
+    fi
     return 0
   fi
 
@@ -393,6 +401,9 @@ prepare_early_bootstrap_nodes() {
   if [[ "${#EARLY_BOOTSTRAP_NODES[@]}" -eq 0 ]]; then
     warn "No early bootstrap nodes passed the temporary checks."
     rm -f "${EARLY_BOOTSTRAP_FILE}" >/dev/null 2>&1 || true
+    if [[ "${mode}" == "non_interactive" ]]; then
+      return 1
+    fi
     return 0
   fi
 
@@ -405,6 +416,7 @@ prepare_early_bootstrap_nodes() {
 
   write_early_bootstrap_file
   success "Temporary early bootstrap node file created: ${EARLY_BOOTSTRAP_FILE}"
+  return 0
 }
 
 maybe_apply_early_bootstrap_fallback() {
@@ -578,7 +590,8 @@ show_intro() {
   echo "Available modes:"
   echo "  1) Recovery (without trusted addnodes)"
   echo "  2) Recovery with trusted addnodes"
-  echo "  3) Restore normal mode (remove helper-managed addnodes + PoSe-bans)"
+  echo "  3) Automatic recovery (fully automated)"
+  echo "  4) Restore normal mode (remove helper-managed addnodes + PoSe-bans)"
   print_line
   echo "Notes:"
   echo " - PoSe evaluation uses 'protx list registered true' to include PoSe-banned nodes."
@@ -975,10 +988,11 @@ choose_mode() {
   echo "Choose mode:"
   echo "1. Recovery (without trusted addnodes)"
   echo "2. Recovery with trusted addnodes"
-  echo "3. Restore normal mode (addnodes + PoSe-bans)"
+  echo "3. Automatic recovery (fully automated)"
+  echo "4. Restore normal mode (remove helper-managed addnodes + PoSe-bans)"
   print_line
 
-  read -r -p "Enter 1, 2 or 3: " SELECTED_MODE
+  read -r -p "Enter 1, 2, 3 or 4: " SELECTED_MODE
 
   case "${SELECTED_MODE}" in
     1)
@@ -988,6 +1002,9 @@ choose_mode() {
       MODE="recovery_addnodes"
       ;;
     3)
+      MODE="recovery_addnodes_auto"
+      ;;
+    4)
       MODE="restore"
       ;;
     *)
@@ -995,7 +1012,7 @@ choose_mode() {
       exit 1
       ;;
   esac
-  
+
 }
 
 pick_random_candidates() {
@@ -1992,13 +2009,62 @@ restore_service_if_needed() {
 }
 
 show_protx_placeholder() {
+  local local_ip service protx_json protx_hash payout_address bls_key cmd_service
+  local command_shown=0
+
+  local_ip="$(get_local_service_ip 2>/dev/null || true)"
+
+  if [[ -n "${local_ip}" ]]; then
+    service="${local_ip}:${DEFAULT_PORT}"
+    protx_json="$(get_protx_match "${service}" 2>/dev/null || true)"
+  else
+    service=""
+    protx_json=""
+  fi
+
+  if [[ -n "${protx_json}" ]]; then
+    protx_hash="$(echo "${protx_json}" | jq -r '.proTxHash // empty' 2>/dev/null)"
+    payout_address="$(echo "${protx_json}" | jq -r '.state.payoutAddress // empty' 2>/dev/null)"
+    cmd_service="$(echo "${protx_json}" | jq -r '.state.service // empty' 2>/dev/null)"
+  else
+    protx_hash=""
+    payout_address=""
+    cmd_service=""
+  fi
+
+  bls_key="$(grep -E '^[[:space:]]*masternodeblsprivkey=' "${DEFAULT_CONF_FILE}" 2>/dev/null | head -n1 | cut -d'=' -f2- | xargs || true)"
+
   print_line
   echo "Controller wallet step:"
   echo
   echo "Run the following command in the controller wallet console after the VPS node is fully synced:"
   echo
-  echo 'protx update_service "PROTX_HASH" "IP:8192" "BLS_SECRET_KEY" "" "FEE_SOURCE_ADDRESS"'
+
+  if [[ -n "${cmd_service}" ]]; then
+    service="${cmd_service}"
+  fi
+
+  if [[ -n "${protx_hash}" && -n "${service}" && -n "${bls_key}" ]]; then
+    if [[ -n "${payout_address}" ]]; then
+      echo "protx update_service \"${protx_hash}\" \"${service}\" \"${bls_key}\" \"\" \"${payout_address}\""
+      command_shown=1
+    else
+      echo "protx update_service \"${protx_hash}\" \"${service}\" \"${bls_key}\" \"\" \"FEE_SOURCE_ADDRESS\""
+      command_shown=1
+    fi
+  fi
+
+  if [[ "${command_shown}" -eq 0 ]]; then
+    echo 'protx update_service "PROTX_HASH" "IP:8192" "BLS_SECRET_KEY" "" "FEE_SOURCE_ADDRESS"'
+  fi
+
   echo
+  if [[ -n "${payout_address}" ]]; then
+    echo "[Hint] The current payout address was inserted as fee source address."
+    echo "[Hint] You may replace it with a separate funded fee address from the controller wallet."
+    echo
+  fi
+
   echo "[Hint] To copy from PuTTY without stopping the script:"
   echo "- Do NOT press Ctrl + C or right-click."
   echo "- Just select text with the left mouse button; it is copied automatically."
@@ -2125,11 +2191,11 @@ get_protx_readiness_snapshot() {
   peer_json="$(run_cli getpeerinfo 2>/dev/null || true)"
   tips_json="$(run_cli getchaintips 2>/dev/null || true)"
 
-  if [[ -z "$bc_json" ]]; then bc_json="{}"; fi
-  if [[ -z "$sync_json" ]]; then sync_json="{}"; fi
-  if [[ -z "$net_json" ]]; then net_json="{}"; fi
-  if [[ -z "$peer_json" ]]; then peer_json="[]"; fi
-  if [[ -z "$tips_json" ]]; then tips_json="[]"; fi
+  [[ -z "$bc_json" ]] && bc_json="{}"
+  [[ -z "$sync_json" ]] && sync_json="{}"
+  [[ -z "$net_json" ]] && net_json="{}"
+  [[ -z "$peer_json" ]] && peer_json="[]"
+  [[ -z "$tips_json" ]] && tips_json="[]"
 
   local blocks headers
   local asset_name is_blockchain_synced is_synced is_failed
@@ -2138,6 +2204,18 @@ get_protx_readiness_snapshot() {
   local high_ping_count max_ping
   local now_ts ready_seconds
   local block_time best_block_age
+  local fork_warn_minutes=$(( FORK_TIPS_WARN_THRESHOLD / 60 ))
+  local headers_warn_minutes=$(( HEADERS_TIPS_WARN_THRESHOLD / 60 ))
+
+  local active_height=""
+  local overall_tip_rating="NONE"
+  local has_non_active_tips=0
+  local fork_elapsed=0
+  local headers_elapsed=0
+  local hard_fail=0
+
+  local -a tip_analysis_lines=()
+  local line tip_height branchlen status diff tip_rating
 
   blocks="$(echo "$bc_json" | jq -r '.blocks // "unknown"' 2>/dev/null)"
   headers="$(echo "$bc_json" | jq -r '.headers // "unknown"' 2>/dev/null)"
@@ -2164,6 +2242,92 @@ get_protx_readiness_snapshot() {
     best_block_age=-1
   fi
 
+  if [[ -n "${SYNC_READY_SINCE_EPOCH}" ]]; then
+    now_ts="$(date +%s)"
+    ready_seconds=$((now_ts - SYNC_READY_SINCE_EPOCH))
+  else
+    ready_seconds=0
+  fi
+
+  active_height="$(echo "$tips_json" | jq -r '.[] | select((.status // "") == "active") | .height' 2>/dev/null | head -n 1)"
+  if ! is_number "${active_height}"; then
+    active_height=""
+  fi
+
+  if [[ -n "${active_height}" ]]; then
+    while IFS=$'\t' read -r tip_height branchlen status; do
+      [[ -z "${tip_height}" ]] && continue
+      has_non_active_tips=1
+
+      if is_number "${active_height}" && is_number "${tip_height}"; then
+        diff=$(( active_height - tip_height ))
+      else
+        diff=-1
+      fi
+
+      tip_rating="WAIT"
+
+      case "${status}" in
+        invalid)
+          tip_rating="HARMLESS"
+          ;;
+        valid-fork)
+          if is_number "${diff}" && is_number "${branchlen}" && (( diff >= 6 )) && (( branchlen <= 3 )); then
+            tip_rating="HARMLESS"
+          else
+            tip_rating="WAIT"
+          fi
+          ;;
+        valid-headers)
+          if is_number "${diff}" && (( diff >= 6 )); then
+            tip_rating="HARMLESS"
+          else
+            tip_rating="WAIT"
+          fi
+          ;;
+        headers-only)
+          if is_number "${active_height}" && is_number "${tip_height}" && (( tip_height >= active_height - 2 )); then
+            tip_rating="CRITICAL"
+          elif is_number "${diff}" && (( diff < 6 )); then
+            tip_rating="CRITICAL"
+          else
+            tip_rating="WAIT"
+          fi
+          ;;
+        *)
+          tip_rating="WAIT"
+          ;;
+      esac
+
+      case "${tip_rating}" in
+        CRITICAL)
+          overall_tip_rating="CRITICAL"
+          ;;
+        WAIT)
+          if [[ "${overall_tip_rating}" != "CRITICAL" ]]; then
+            overall_tip_rating="WAIT"
+          fi
+          ;;
+        HARMLESS)
+          if [[ "${overall_tip_rating}" == "NONE" ]]; then
+            overall_tip_rating="HARMLESS"
+          fi
+          ;;
+      esac
+
+      tip_analysis_lines+=("  Tip height: ${tip_height} | branchlen: ${branchlen} | status: ${status} | diff: +${diff} -> ${tip_rating}")
+    done < <(
+      echo "${tips_json}" | jq -r '
+        .[] | select((.status // "") != "active")
+        | [
+            (.height // "unknown"),
+            (.branchlen // "unknown"),
+            (.status // "unknown")
+          ] | @tsv
+      ' 2>/dev/null
+    )
+  fi
+
   print_line
   echo "ProTx readiness check"
   echo "---------------------"
@@ -2186,24 +2350,17 @@ get_protx_readiness_snapshot() {
   fi
 
   if [[ -n "${SYNC_READY_SINCE_EPOCH}" ]]; then
-    now_ts="$(date +%s)"
-    ready_seconds=$((now_ts - SYNC_READY_SINCE_EPOCH))
     echo "Fully synced for      : ${ready_seconds} seconds"
   else
-    ready_seconds=0
     echo "Fully synced for      : not tracked yet"
   fi
 
   echo
 
-  local hard_fail=0
-
   if [[ "${blocks}" != "${headers}" ]]; then
     warn "Blocks and headers do not match yet."
     hard_fail=1
   fi
-
-  # initialblockdownload komplett entfernt
 
   if [[ "${asset_name}" != "MASTERNODE_SYNC_FINISHED" ]]; then
     warn "Masternode sync stage is not MASTERNODE_SYNC_FINISHED yet."
@@ -2230,21 +2387,69 @@ get_protx_readiness_snapshot() {
     hard_fail=1
   fi
 
-  if ! is_number "${headers_only_count}" || (( headers_only_count > 0 )); then
-    warn "There are still headers-only chain tips."
-    info "If there is only 1 and all other values look good, you may still continue."
-    hard_fail=1
+  if (( has_non_active_tips > 0 )); then
+    echo "Chain tip analysis"
+    echo "------------------"
+
+    case "${overall_tip_rating}" in
+      CRITICAL)
+        warn "A headers-only tip at or near the current chain height was detected."
+        warn "This may indicate an active fork attempt."
+        warn "It is recommended to restart recovery with 'n'."
+        info "Mode 1 (without addnodes) is usually enough; modes 2/3 are optional."
+        hard_fail=1
+        ;;
+      WAIT)
+        warn "One or more chain tips are recent and need more time."
+        info "Waiting is recommended. Run 'r' again in a few minutes."
+        hard_fail=1
+        ;;
+      HARMLESS)
+        success "All non-active chain tips appear harmless."
+        success "Height distance and branch length are within safe thresholds."
+        success "It is safe to continue with 'x' despite the tip count > 0."
+        ;;
+    esac
+
+    for line in "${tip_analysis_lines[@]}"; do
+      echo "${line}"
+    done
+
+    echo
+
+    if (( fork_count > 0 )); then
+      if [[ -z "${FORK_TIPS_SINCE}" ]]; then
+        FORK_TIPS_SINCE="$(date +%s)"
+      fi
+      fork_elapsed=$(( $(date +%s) - FORK_TIPS_SINCE ))
+      if (( fork_elapsed >= FORK_TIPS_WARN_THRESHOLD )); then
+        info "Fork-like tips have been present for over ${fork_warn_minutes} minutes."
+        info "If this does not resolve on its own, it is recommended to"
+        info "restart the full recovery with 'n' to rebuild the chain state."
+        info "Mode 1 (without addnodes) is usually enough; modes 2/3 are optional."
+      fi
+    else
+      FORK_TIPS_SINCE=""
+    fi
+
+    if (( headers_only_count > 0 )); then
+      if [[ -z "${HEADERS_TIPS_SINCE}" ]]; then
+        HEADERS_TIPS_SINCE="$(date +%s)"
+      fi
+      headers_elapsed=$(( $(date +%s) - HEADERS_TIPS_SINCE ))
+      if (( headers_elapsed >= HEADERS_TIPS_WARN_THRESHOLD )); then
+        info "Headers-only tips have been present for over ${headers_warn_minutes} minutes."
+        info "If this does not resolve on its own, it is recommended to"
+        info "restart the full recovery with 'n' to rebuild the chain state."
+      fi
+    else
+      HEADERS_TIPS_SINCE=""
+    fi
+  else
+    FORK_TIPS_SINCE=""
+    HEADERS_TIPS_SINCE=""
   fi
 
-  if ! is_number "${fork_count}" || (( fork_count > 0 )); then
-    warn "There are still fork-like chain tips."
-    info "The node still sees alternative valid-looking chain branches."
-    info "Waiting is recommended until fork-like tips are 0 and the chain state looks stable."
-    hard_fail=1
-  fi
-
-  # Optional: Best-block-age als zusätzliche harte oder weiche Bedingung
-  # Beispiel: harter Check, wenn der Tip deutlich zu alt ist
   if (( best_block_age >= 0 )) && (( best_block_age > PROTX_MAX_TIP_AGE )); then
     warn "Best block age (${best_block_age}s) is older than recommended tip age (${PROTX_MAX_TIP_AGE}s)."
     hard_fail=1
@@ -2261,6 +2466,7 @@ get_protx_readiness_snapshot() {
     info "If the situation does not improve over time (for example fork-like tips"
     info "or headers-only tips stay present, or the local view differs from a"
     info "trusted explorer), it can be safer to run this recovery helper again with 'n'."
+    info "Mode 1 (without addnodes) is usually enough; modes 2/3 are optional."
     return 1
   fi
 
@@ -2510,6 +2716,17 @@ run_recovery_addnodes_mode() {
 
     # ------------------------------------------------------------------
     print_line
+    info "Phase 1 – Temporary early bootstrap node preparation (RPC still active)"
+    print_line
+    echo "This step builds a temporary bootstrap node list while RPC is still available."
+    echo "The list will be used as a fallback after the daemon restarts on a clean chain,"
+    echo "in case normal seed node discovery fails."
+    print_line
+
+    prepare_early_bootstrap_nodes
+
+    # ------------------------------------------------------------------
+    print_line
     info "Phase 2 – Stopping daemon and cleaning up local chain data"
     print_line
 
@@ -2538,23 +2755,17 @@ run_recovery_addnodes_mode() {
 
     # ------------------------------------------------------------------
     print_line
-    info "Phase – Temporary early bootstrap addnode check"
+    info "Phase – Temporary early bootstrap addnode fallback"
     print_line
     echo "The daemon is running but not yet fully synced."
-    echo "This optional step tests a random subset of trusted addnodes for"
-    echo "basic reachability and sends them via 'addnode onetry' to help"
-    echo "the daemon find peers — especially if seed nodes are unreachable."
+    echo "Checking whether the early bootstrap fallback is needed"
+    echo "(bootstrap file was prepared in Phase 1 while RPC was still active)."
     print_line
-  
+
     if wait_for_rpc 60 5; then
-      if [[ ! -f "${DEFAULT_ADDNODE_FILE}" ]]; then
-        warn "trusted_addnodes.txt was not found. Early bootstrap addnode step skipped."
-      else
-        prepare_early_bootstrap_nodes
-        maybe_apply_early_bootstrap_fallback
-      fi
+      maybe_apply_early_bootstrap_fallback
     else
-      warn "RPC did not respond in time. Early bootstrap addnode step skipped."
+      warn "RPC did not respond in time. Early bootstrap fallback step skipped."
     fi
 
     # ------------------------------------------------------------------
@@ -2615,6 +2826,262 @@ run_recovery_addnodes_mode() {
     info "Showing final local status snapshot..."
     show_local_status
     show_protx_placeholder
+}
+
+run_recovery_addnodes_auto_mode() {
+  info "Selected: Automatic recovery (fully automated, no confirmations)."
+  print_line
+  echo "This mode performs a fully automated recovery with trusted addnodes."
+  echo "All steps run without user confirmations."
+  echo "The only manual input required is the reference block height."
+  print_line
+
+  # ------------------------------------------------------------------
+  print_line
+  info "Phase 1 – Pre-stop preparation (fully automatic)"
+  print_line
+
+  check_addnode_file
+  load_addnodes
+  dedupe_addnodes_array
+  validate_addnodes
+  show_addnodes
+
+  prompt_reference_height
+
+  ADDNODE_CHECK_MODE="hard"
+  info "Addnode check mode set automatically: hard"
+
+  show_local_status
+  check_service_and_process
+
+  backup_conf
+
+  print_line
+  info "Collecting PoSe problem nodes for automatic banlist preparation..."
+  print_line
+  if collect_pose_problem_nodes; then
+    if [[ "${ALL_POSE_COUNT:-0}" -gt 0 ]]; then
+      show_pose_problem_nodes_preview
+      save_pose_banlist_file_prepared
+    else
+      warn "No PoSe-based IPs found. Banlist skipped."
+    fi
+  else
+    warn "PoSe evaluation returned no data. Banlist skipped."
+  fi
+
+  print_line
+  info "Phase 1 – Temporary early bootstrap node preparation (non-interactive)"
+  print_line
+  echo "Building temporary bootstrap node list while RPC is still available..."
+  print_line
+
+  if ! prepare_early_bootstrap_nodes "non_interactive"; then
+    error "No early bootstrap nodes were found or accepted."
+    error "Cannot continue automatic recovery without bootstrap nodes."
+    error "The node might start without any peers after restart."
+    warn "Returning to main menu. Please check trusted_addnodes.txt and try again."
+    return 0
+  fi
+
+  # ------------------------------------------------------------------
+  print_line
+  info "Phase 2 – Stopping daemon and cleaning up local chain data (automatic)"
+  print_line
+
+  if service_unit_exists; then
+    if systemctl is-enabled "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+      info "Service is enabled. Disabling temporarily to prevent auto-restart..."
+      if systemctl disable "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+        SERVICE_WAS_DISABLED=1
+        success "Service disabled temporarily."
+      else
+        warn "systemctl disable did not succeed."
+      fi
+      sleep 2
+    fi
+    info "Stopping service..."
+    systemctl stop "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl stop did not succeed."
+    sleep 8
+  else
+    warn "Service file ${DEFAULT_SERVICE}.service not found. Skipping systemctl stop."
+  fi
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    info "Trying RPC stop..."
+    run_cli stop >/dev/null 2>&1 || warn "RPC stop did not succeed."
+    sleep 10
+  fi
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    warn "Daemon still running after service/RPC stop. Trying normal kill..."
+    pkill -f "${DEFAULT_DAEMON}" || warn "Normal kill did not succeed."
+    sleep 5
+  fi
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    warn "Daemon still running after normal kill. Trying hard kill (kill -9)..."
+    pkill -9 -f "${DEFAULT_DAEMON}" || warn "Hard kill did not succeed."
+    sleep 3
+  fi
+
+  show_stop_summary
+
+  if ! verify_daemon_stopped; then
+    error "Safe stopped state was NOT confirmed. Aborting automatic recovery."
+    exit 1
+  fi
+  success "Daemon fully stopped."
+
+  local lock_file="${DEFAULT_DATA_DIR}/.lock"
+  if [[ -f "${lock_file}" ]]; then
+    rm -f "${lock_file}"
+    success "Lock file removed."
+  else
+    info "No lock file found."
+  fi
+
+  print_line
+  info "Performing automatic cleanup of local chain data..."
+  print_line
+  rm -f "${DEFAULT_DATA_DIR}/peers.dat"
+  rm -f "${DEFAULT_DATA_DIR}/banlist.json" "${DEFAULT_DATA_DIR}/banlist.dat"
+  rm -f "${DEFAULT_DATA_DIR}/mncache.dat"
+  rm -f "${DEFAULT_DATA_DIR}/netfulfilled.dat"
+  rm -rf "${DEFAULT_DATA_DIR}/llmq"
+  rm -rf "${DEFAULT_DATA_DIR}/evodb"
+  rm -rf "${DEFAULT_DATA_DIR}/blocks"
+  rm -rf "${DEFAULT_DATA_DIR}/chainstate"
+  rm -rf "${DEFAULT_DATA_DIR}/indexes"
+  success "Cleanup completed."
+
+  # ------------------------------------------------------------------
+  print_line
+  info "Phase 3 – Starting daemon on clean chain (automatic)"
+  print_line
+
+  restore_service_if_needed || { error "Final service start failed."; exit 1; }
+  check_service_and_process
+
+  print_line
+  info "Phase – Temporary early bootstrap addnode fallback"
+  print_line
+  if wait_for_rpc 60 5; then
+    maybe_apply_early_bootstrap_fallback
+  else
+    warn "RPC did not respond in time. Early bootstrap fallback step skipped."
+  fi
+
+  # ------------------------------------------------------------------
+  print_line
+  info "Phase – Automatic sync wait loop (checking every 60 seconds)"
+  print_line
+  echo "Waiting for the node to fully synchronize..."
+  echo "Loop ends when IsSynced=true AND AssetName=MASTERNODE_SYNC_FINISHED."
+  echo "No timeout. Press Ctrl+C to abort manually if needed."
+  print_line
+
+  while true; do
+    local ts block_height sync_json asset_name is_synced is_blockchain_synced
+
+    ts="$(date '+%Y-%m-%d %H:%M:%S')"
+    block_height="$(run_cli getblockcount 2>/dev/null || echo 'unknown')"
+    sync_json="$(run_cli mnsync status 2>/dev/null || echo '{}')"
+    asset_name="$(echo "${sync_json}" | jq -r '.AssetName // "unknown"' 2>/dev/null)"
+    is_blockchain_synced="$(echo "${sync_json}" | jq -r '.IsBlockchainSynced // "unknown"' 2>/dev/null)"
+    is_synced="$(echo "${sync_json}" | jq -r '.IsSynced // "unknown"' 2>/dev/null)"
+
+    echo "[${ts}] Height: ${block_height} | Stage: ${asset_name} | Blockchain synced: ${is_blockchain_synced} | Masternode synced: ${is_synced}"
+
+    if [[ "${is_synced}" == "true" && "${asset_name}" == "MASTERNODE_SYNC_FINISHED" ]]; then
+      success "Node is fully synced. Proceeding with addnode verification."
+      SYNC_READY_SINCE_EPOCH="$(date +%s)"
+      break
+    fi
+
+    sleep 60
+  done
+
+  # ------------------------------------------------------------------
+  print_line
+  info "Phase 4 – Addnode verification (automatic, hard mode)"
+  print_line
+
+  pick_random_candidates
+  check_addnode_candidates
+
+  if [[ "${#GOOD_ADDNODES[@]}" -eq 0 ]]; then
+    error "No trusted addnodes passed the verification."
+    error "Cannot write addnode config without verified nodes."
+    exit 1
+  fi
+
+  # ------------------------------------------------------------------
+  print_line
+  info "Phase 5 – Writing verified addnodes to defcon.conf and restarting daemon (automatic)"
+  print_line
+
+  dedupe_good_addnodes_array
+  cp "${DEFAULT_CONF_FILE}" "${DEFAULT_CONF_FILE}.pre-managed.$(date +%Y%m%d-%H%M%S)"
+
+  awk -v start="${MANAGED_START}" -v end="${MANAGED_END}" '
+    $0 == start {skip=1; next}
+    $0 == end {skip=0; next}
+    !skip {print}
+  ' "${DEFAULT_CONF_FILE}" | sed '/^addnode=/d' > "${DEFAULT_CONF_FILE}.tmp"
+
+  {
+    echo
+    echo "${MANAGED_START}"
+    for node in "${GOOD_ADDNODES[@]}"; do
+      echo "addnode=${node}"
+    done
+    echo "${MANAGED_END}"
+  } >> "${DEFAULT_CONF_FILE}.tmp"
+
+  mv "${DEFAULT_CONF_FILE}.tmp" "${DEFAULT_CONF_FILE}"
+  success "Verified trusted addnodes written to defcon.conf."
+
+  print_line
+  info "Stopping daemon temporarily to reload config with verified addnodes..."
+  print_line
+
+  stop_daemon_for_config_reload || { error "Daemon stop for config reload failed."; exit 1; }
+
+  print_line
+  info "Restarting daemon with verified addnode config..."
+  print_line
+
+  restore_service_if_needed || { error "Daemon restart after config write failed."; exit 1; }
+  check_service_and_process
+
+  # ------------------------------------------------------------------
+  print_line
+  info "Phase 6 – PoSe bans + readiness check"
+  print_line
+
+  if wait_for_rpc 60 5; then
+    apply_prepared_pose_bans
+  else
+    warn "RPC did not respond in time. PoSe ban application skipped."
+  fi
+
+  print_line
+  info "Current sync state after Phase 6 restart:"
+  print_line
+  show_sync_progress
+
+  print_line
+  info "Automatic recovery steps completed."
+  info "Handing over to interactive ProTx readiness menu."
+  print_line
+
+  interactive_protx_readiness_menu
+
+  info "Showing final local status snapshot..."
+  show_local_status
+  show_protx_placeholder
 }
 
 check_ready_for_restore() {
@@ -2736,6 +3203,10 @@ main() {
     recovery_addnodes)
       ensure_daemon_running || exit 1
       run_recovery_addnodes_mode
+      ;;
+    recovery_addnodes_auto)
+      ensure_daemon_running || exit 1
+      run_recovery_addnodes_auto_mode
       ;;
     restore)
       run_restore_mode

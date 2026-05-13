@@ -2403,7 +2403,7 @@ get_protx_readiness_snapshot() {
         warn "A headers-only tip at or near the current chain height was detected."
         warn "This may indicate an active fork attempt."
         warn "It is recommended to restart recovery with 'n'."
-        info "Mode 1 (without addnodes) is usually enough; modes 2/3 are optional."
+        info "The basic recovery without managed addnodes is usually enough; recovery with trusted addnodes is only needed in more complex cases."
         hard_fail=1
         ;;
       WAIT)
@@ -2433,7 +2433,7 @@ get_protx_readiness_snapshot() {
         info "Fork-like tips have been present for over ${fork_warn_minutes} minutes."
         info "If this does not resolve on its own, it is recommended to"
         info "restart the full recovery with 'n' to rebuild the chain state."
-        info "Mode 1 (without addnodes) is usually enough; modes 2/3 are optional."
+        info "The basic recovery without managed addnodes is usually enough; recovery with trusted addnodes is only needed in more complex cases."
       fi
     else
       FORK_TIPS_SINCE=""
@@ -2473,7 +2473,7 @@ get_protx_readiness_snapshot() {
     info "If the situation does not improve over time (for example fork-like tips"
     info "or headers-only tips stay present, or the local view differs from a"
     info "trusted explorer), it can be safer to run this recovery helper again with 'n'."
-    info "Mode 1 (without addnodes) is usually enough; modes 2/3 are optional."
+    info "The basic recovery without managed addnodes is usually enough; recovery with trusted addnodes is only needed in more complex cases."
     return 1
   fi
 

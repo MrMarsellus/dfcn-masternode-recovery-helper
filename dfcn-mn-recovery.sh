@@ -2,7 +2,7 @@
 
 set -u
 
-SCRIPT_VERSION="0.5.0"
+SCRIPT_VERSION="0.5.1"
 
 DEFAULT_DEFCON_USER="defcon"
 DEFAULT_DEFCON_HOME="/home/defcon"
@@ -590,8 +590,9 @@ show_intro() {
   echo "Available modes:"
   echo "  1) Recovery (without trusted addnodes)"
   echo "  2) Recovery with trusted addnodes"
-  echo "  3) Automatic recovery (fully automated)"
-  echo "  4) Restore normal mode (remove helper-managed addnodes + PoSe-bans)"
+  echo "  3) Automatic recovery with trusted addnodes"
+  echo "  4) Automatic recovery (without trusted addnodes)"
+  echo "  5) Restore normal mode (remove helper-managed addnodes + PoSe-bans)"
   print_line
   echo "Notes:"
   echo " - PoSe evaluation uses 'protx list registered true' to include PoSe-banned nodes."
@@ -988,11 +989,12 @@ choose_mode() {
   echo "Choose mode:"
   echo "1. Recovery (without trusted addnodes)"
   echo "2. Recovery with trusted addnodes"
-  echo "3. Automatic recovery (fully automated)"
-  echo "4. Restore normal mode (remove helper-managed addnodes + PoSe-bans)"
+  echo "3. Automatic recovery with trusted addnodes"
+  echo "4. Automatic recovery (without trusted addnodes)"
+  echo "5. Restore normal mode (remove helper-managed addnodes + PoSe-bans)"
   print_line
 
-  read -r -p "Enter 1, 2, 3 or 4: " SELECTED_MODE
+  read -r -p "Enter 1, 2, 3, 4 or 5: " SELECTED_MODE
 
   case "${SELECTED_MODE}" in
     1)
@@ -1005,6 +1007,9 @@ choose_mode() {
       MODE="recovery_addnodes_auto"
       ;;
     4)
+      MODE="recovery_plain_auto"
+      ;;
+    5)
       MODE="restore"
       ;;
     *)
@@ -1012,7 +1017,6 @@ choose_mode() {
       exit 1
       ;;
   esac
-
 }
 
 pick_random_candidates() {
@@ -2599,6 +2603,157 @@ run_recovery_plain_mode() {
   show_protx_placeholder
 }
 
+run_recovery_plain_auto_mode() {
+  info "Selected: Automatic recovery without trusted addnodes."
+  print_line
+  echo "This mode performs an automatic recovery WITHOUT changing addnode settings."
+  echo "No helper-managed trusted addnodes will be written to defcon.conf."
+  echo "No PoSe-based temporary banlist will be prepared in this mode."
+  echo "The only manual input required is the reference block height."
+  print_line
+
+  show_local_status
+  check_service_and_process
+  backup_conf
+  prompt_reference_height
+
+  print_line
+  info "Phase 1 – Stopping daemon and cleaning up local chain data (automatic)"
+  print_line
+
+  if service_unit_exists; then
+    if systemctl is-enabled "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+      info "Service is enabled. Disabling temporarily to prevent auto-restart..."
+      if systemctl disable "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+        SERVICE_WAS_DISABLED=1
+        success "Service disabled temporarily."
+      else
+        warn "systemctl disable did not succeed."
+      fi
+      sleep 2
+    fi
+
+    info "Stopping service..."
+    systemctl stop "${DEFAULT_SERVICE}" >/dev/null 2>&1 || warn "systemctl stop did not succeed."
+    sleep 8
+  else
+    warn "Service file ${DEFAULT_SERVICE}.service not found. Skipping systemctl stop."
+  fi
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    info "Trying RPC stop..."
+    run_cli stop >/dev/null 2>&1 || warn "RPC stop did not succeed."
+    sleep 10
+  fi
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    warn "Daemon still running after service/RPC stop. Trying normal kill..."
+    pkill -f "${DEFAULT_DAEMON}" >/dev/null 2>&1 || warn "Normal kill did not succeed."
+    sleep 5
+  fi
+
+  if pgrep -f "${DEFAULT_DAEMON}" >/dev/null 2>&1; then
+    warn "Daemon still running after normal kill. Trying hard kill (kill -9)..."
+    pkill -9 -f "${DEFAULT_DAEMON}" >/dev/null 2>&1 || warn "Hard kill did not succeed."
+    sleep 3
+  fi
+
+  show_stop_summary
+
+  if ! verify_daemon_stopped; then
+    error "Safe stopped state was NOT confirmed. Aborting automatic recovery."
+    exit 1
+  fi
+  success "Daemon fully stopped."
+
+  local lock_file="${DEFAULT_DATA_DIR}/.lock"
+  if [[ -f "${lock_file}" ]]; then
+    rm -f "${lock_file}"
+    success "Lock file removed."
+  else
+    info "No lock file found."
+  fi
+
+  print_line
+  info "Performing automatic cleanup of local chain data..."
+  print_line
+  rm -f "${DEFAULT_DATA_DIR}/peers.dat"
+  rm -f "${DEFAULT_DATA_DIR}/banlist.json" "${DEFAULT_DATA_DIR}/banlist.dat"
+  rm -f "${DEFAULT_DATA_DIR}/mncache.dat"
+  rm -f "${DEFAULT_DATA_DIR}/netfulfilled.dat"
+  rm -rf "${DEFAULT_DATA_DIR}/llmq"
+  rm -rf "${DEFAULT_DATA_DIR}/evodb"
+  rm -rf "${DEFAULT_DATA_DIR}/blocks"
+  rm -rf "${DEFAULT_DATA_DIR}/chainstate"
+  rm -rf "${DEFAULT_DATA_DIR}/indexes"
+  success "Cleanup completed."
+
+  print_line
+  info "Phase 2 – Starting daemon on clean chain (automatic)"
+  print_line
+
+  restore_service_if_needed || { error "Final service start failed."; exit 1; }
+  check_service_and_process
+
+  print_line
+  info "Phase – Temporary early bootstrap addnode fallback"
+  print_line
+  echo "The daemon is running but not yet fully synced."
+  echo "Checking whether the early bootstrap fallback is needed."
+  print_line
+
+  if wait_for_rpc 60 5; then
+    if [[ -f "${DEFAULT_ADDNODE_FILE}" ]]; then
+      prepare_early_bootstrap_nodes "non_interactive"
+      maybe_apply_early_bootstrap_fallback
+    else
+      warn "trusted_addnodes.txt was not found. Early bootstrap fallback step skipped."
+    fi
+  else
+    warn "RPC did not respond in time. Early bootstrap fallback step skipped."
+  fi
+
+  print_line
+  info "Phase – Automatic sync wait loop (checking every 60 seconds)"
+  print_line
+  echo "Waiting for the node to fully synchronize..."
+  echo "Loop ends when IsSynced=true AND AssetName=MASTERNODE_SYNC_FINISHED."
+  echo "No timeout. Press Ctrl+C to abort manually if needed."
+  print_line
+
+  while true; do
+    local ts block_height sync_json asset_name is_synced is_blockchain_synced
+
+    ts="$(date '+%Y-%m-%d %H:%M:%S')"
+    block_height="$(run_cli getblockcount 2>/dev/null || echo 'unknown')"
+    sync_json="$(run_cli mnsync status 2>/dev/null || echo '{}')"
+    asset_name="$(echo "${sync_json}" | jq -r '.AssetName // "unknown"' 2>/dev/null)"
+    is_blockchain_synced="$(echo "${sync_json}" | jq -r '.IsBlockchainSynced // "unknown"' 2>/dev/null)"
+    is_synced="$(echo "${sync_json}" | jq -r '.IsSynced // "unknown"' 2>/dev/null)"
+
+    echo "[${ts}] Height: ${block_height} | Stage: ${asset_name} | Blockchain synced: ${is_blockchain_synced} | Masternode synced: ${is_synced}"
+
+    if [[ "${is_synced}" == "true" && "${asset_name}" == "MASTERNODE_SYNC_FINISHED" ]]; then
+      success "Node is fully synced."
+      SYNC_READY_SINCE_EPOCH="$(date +%s)"
+      break
+    fi
+
+    sleep 60
+  done
+
+  print_line
+  info "Automatic plain recovery steps completed."
+  info "Handing over to interactive ProTx readiness menu."
+  print_line
+
+  interactive_protx_readiness_menu
+
+  info "Showing final local status snapshot..."
+  show_local_status
+  show_protx_placeholder
+}
+
 wait_for_rpc() {
   local max_attempts="${1:-30}"
   local sleep_sec="${2:-5}"
@@ -3210,6 +3365,10 @@ main() {
     recovery_addnodes_auto)
       ensure_daemon_running || exit 1
       run_recovery_addnodes_auto_mode
+      ;;
+    recovery_plain_auto)
+      ensure_daemon_running || exit 1
+      run_recovery_plain_auto_mode
       ;;
     restore)
       run_restore_mode

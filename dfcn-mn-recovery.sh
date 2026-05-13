@@ -2290,6 +2290,13 @@ get_protx_readiness_snapshot() {
             tip_rating="WAIT"
           fi
           ;;
+        conflicting)
+          if is_number "${diff}" && (( diff >= 6 )); then
+            tip_rating="HARMLESS"
+          else
+            tip_rating="WAIT"
+          fi
+          ;;
         headers-only)
           if is_number "${active_height}" && is_number "${tip_height}" && (( tip_height >= active_height - 2 )); then
             tip_rating="CRITICAL"

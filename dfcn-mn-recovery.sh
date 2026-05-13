@@ -2,7 +2,7 @@
 
 set -u
 
-SCRIPT_VERSION="0.4.7-step2"
+SCRIPT_VERSION="0.5.0"
 
 DEFAULT_DEFCON_USER="defcon"
 DEFAULT_DEFCON_HOME="/home/defcon"

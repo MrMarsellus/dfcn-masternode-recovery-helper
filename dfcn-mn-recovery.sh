@@ -2200,7 +2200,7 @@ get_protx_readiness_snapshot() {
   local blocks headers
   local asset_name is_blockchain_synced is_synced is_failed
   local connections peer_count
-  local headers_only_count fork_count
+  local headers_only_count fork_count conflicting_count
   local high_ping_count max_ping
   local now_ts ready_seconds
   local block_time best_block_age
@@ -2231,6 +2231,7 @@ get_protx_readiness_snapshot() {
 
   headers_only_count="$(echo "$tips_json" | jq '[.[] | select((.status // "") == "headers-only")] | length' 2>/dev/null || echo 0)"
   fork_count="$(echo "$tips_json" | jq '[.[] | select((.status // "") == "valid-fork" or (.status // "") == "valid-headers")] | length' 2>/dev/null || echo 0)"
+  conflicting_count="$(echo "$tips_json" | jq '[.[] | select((.status // "") == "conflicting")] | length' 2>/dev/null || echo 0)"
 
   high_ping_count="$(echo "$peer_json" | jq --argjson max_ping "${PROTX_MAX_PEER_PING}" '[.[] | select(((.pingtime // 999999) > $max_ping))] | length' 2>/dev/null || echo 0)"
   max_ping="$(echo "$peer_json" | jq -r '[.[].pingtime // empty] | max // "n/a"' 2>/dev/null || echo "n/a")"
@@ -2315,7 +2316,7 @@ get_protx_readiness_snapshot() {
           ;;
       esac
 
-      tip_analysis_lines+=("  Tip height: ${tip_height} | branchlen: ${branchlen} | status: ${status} | diff: +${diff} -> ${tip_rating}")
+      tip_analysis_lines+=("  Tip height: ${tip_height} | branchlen: ${branchlen} | status: ${status} | diff: ${diff} -> ${tip_rating}")
     done < <(
       echo "${tips_json}" | jq -r '
         .[] | select((.status // "") != "active")
@@ -2341,6 +2342,7 @@ get_protx_readiness_snapshot() {
   echo "Peers visible         : ${peer_count}"
   echo "Headers-only tips     : ${headers_only_count}"
   echo "Fork-like tips        : ${fork_count}"
+  echo "Conflicting tips      : ${conflicting_count}"
   echo "Peers with ping > ${PROTX_MAX_PEER_PING}s: ${high_ping_count}"
   echo "Max peer ping         : ${max_ping}"
   if (( best_block_age >= 0 )); then
@@ -2390,6 +2392,7 @@ get_protx_readiness_snapshot() {
   if (( has_non_active_tips > 0 )); then
     echo "Chain tip analysis"
     echo "------------------"
+    echo "(Includes conflicting tips in addition to headers-only / fork-like statuses.)"
 
     case "${overall_tip_rating}" in
       CRITICAL)

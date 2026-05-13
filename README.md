@@ -1,12 +1,13 @@
 # DeFCoN Masternode Recovery Helper
 
-Cautious recovery helper for DeFCoN masternodes with optional trusted addnodes and a PoSe-based temporary ban feature.
+Cautious recovery helper for DeFCoN masternodes with optional trusted addnodes, a PoSe-based temporary ban feature, and an automatic recovery mode.
 
 ## Features
 
-- Three guided modes:
+- Four guided modes:
   - Recovery without trusted addnodes
   - Recovery with trusted addnodes
+  - Automatic recovery (fully automated, with trusted addnodes)
   - Restore normal mode (revert helper-managed addnodes + optional PoSe unbans)
 - Trusted addnodes:
   - Loaded from `trusted_addnodes.txt`
@@ -20,7 +21,7 @@ Cautious recovery helper for DeFCoN masternodes with optional trusted addnodes a
   - Cautious daemon stop (systemd + RPC + optional kill) with stop verification
   - Optional disable/mask of the service to prevent unwanted auto-restarts
   - Optional lockfile removal and resync cleanup (`peers.dat`, `banlist.*`, `mncache.dat`, `llmq`, `blocks`, `chainstate`, `indexes`, `evodb`)
-- PoSe integration (recovery with addnodes + restore mode):
+- PoSe integration (recovery with addnodes, automatic recovery, restore mode):
   - Evaluates the deterministic masternode list via `protx list registered true` (includes PoSe-banned nodes)
   - Detects problematic masternodes:
     - PoSe-banned: `state.PoSeBanHeight > 0`
@@ -30,14 +31,14 @@ Cautious recovery helper for DeFCoN masternodes with optional trusted addnodes a
   - Tracking file `recovery_pose_bans.txt` with states `prepared` and `applied` for clean unban in restore mode
 - Monitoring & control:
   - Interactive sync monitoring menu (block height, `mnsync status`, summarized sync state, `debug.log` tail)
-  - Interactive ProTx readiness menu after full sync (`getblockchaininfo`, `mnsync status`, connections, peers, `getchaintips`, optional log views)
-  - Controller-wallet hint with `protx update_service` template after sync and readiness checks
+  - Interactive ProTx readiness menu after full sync (blockchain info, sync state, connections, peers, chain tips, optional log views)
+  - Controller-wallet hint with a `protx update_service` template after sync and readiness checks, optionally prefilled with data from the deterministic MN list
   - Interactive safety check before restore (READY + fully synced MN)
 
 ## Files
 
 - `dfcn-mn-recovery.sh` – main script
-- `trusted_addnodes.txt` – optional trusted addnode list (used only in mode 2)
+- `trusted_addnodes.txt` – optional trusted addnode list (used in mode 2 and mode 3)
 - `recovery_pose_bans.txt` – optional PoSe banlist managed by the script (only if PoSe feature is used)
 
 ## Installation & Start
@@ -59,7 +60,7 @@ chmod +x /root/dfcn-mn-recovery.sh && \
 ```bash
 cd /root
 wget -O dfcn-mn-recovery.sh "https://raw.githubusercontent.com/MrMarsellus/dfcn-masternode-recovery-helper/main/dfcn-mn-recovery.sh"
-wget -O trusted_addnodes.txt "https://raw.githubusercontent.com/MrMarsellus/dfcn-mn-recovery-helper/main/trusted_addnodes.txt"
+wget -O trusted_addnodes.txt "https://raw.githubusercontent.com/MrMarsellus/dfcn-masternode-recovery-helper/main/trusted_addnodes.txt"
 chmod +x /root/dfcn-mn-recovery.sh
 ```
 
@@ -82,9 +83,10 @@ On startup, the script will:
 - Ask you to choose a mode:
   - `1` = Recovery without trusted addnodes
   - `2` = Recovery with trusted addnodes
-  - `3` = Restore normal mode
+  - `3` = Automatic recovery (fully automated, with trusted addnodes)
+  - `4` = Restore normal mode
 
-**Note:** `trusted_addnodes.txt` is only required for mode 2.
+**Note:** `trusted_addnodes.txt` is required for mode 2 and mode 3.
 
 ## Mode 1 – Recovery without trusted addnodes
 
@@ -137,7 +139,7 @@ Detailed flow:
 **Phase 4 – Write config and final restart**
 
 14. On confirmation: write a clearly separated helper block with verified addnodes into `defcon.conf`.
-15. Stop the daemon again (silent config-reload stop, same reliability as the cautious stop).
+15. Stop the daemon again (config-reload stop, same reliability as the cautious stop).
 16. Start the daemon with the verified addnode configuration active.
 
 **Phase 5 – Post-restart**
@@ -149,7 +151,35 @@ Detailed flow:
 
 This mode is intended for nodes that benefit from a curated peer set during recovery, and especially for nodes that were stuck on a wrong fork where pre-stop addnode checks would produce unreliable results.
 
-## Mode 3 – Restore normal mode
+## Mode 3 – Automatic recovery (with trusted addnodes)
+
+Goal: fully automated variant of mode 2 with minimal interaction.
+
+Key differences to mode 2:
+
+- Addnodes are always loaded automatically from `trusted_addnodes.txt` (no manual nano input).
+- Addnode check mode is fixed to **hard** (multiple rounds, stricter filtering).
+- PoSe-based banlist preparation is fully automatic (no confirmations).
+- The entire stop, cleanup and restart sequence runs without `ask_yes_no` prompts.
+- The only manual input is the reference block height of the correct chain.
+
+Simplified flow:
+
+1. Load and validate `trusted_addnodes.txt`, show selected addnodes.
+2. Prompt for reference block height (manual input, same as in mode 2).
+3. Collect PoSe-problem nodes and prepare a PoSe-based banlist automatically if any are found.
+4. Build a temporary early-bootstrap list in non-interactive mode; abort back to the main menu if no acceptable nodes are found (to avoid starting with zero peers).
+5. Stop daemon/service automatically and perform cleanup of all relevant chain/peer/cache data.
+6. Start the daemon on a clean chain, wait for RPC, and apply the early-bootstrap fallback if normal peer discovery does not produce peers.
+7. Start an automatic sync wait loop (every 60 seconds print height + sync state) until `IsSynced=true` and `AssetName=MASTERNODE_SYNC_FINISHED`.
+8. Run addnode verification in hard mode; abort if no trusted nodes pass the checks.
+9. Write the verified addnodes into the managed block in `defcon.conf` and perform a controlled config reload (stop + start) to activate them.
+10. Apply the prepared PoSe-banlist (if present) after restart and show the current sync state once.
+11. Hand over to the interactive ProTx readiness menu and then to the controller-wallet hint.
+
+This mode is intended for operators who want a mostly hands-off recovery using trusted addnodes, with only the reference height and controller-wallet transaction performed manually.
+
+## Mode 4 – Restore normal mode
 
 Goal: revert helper changes once the node is stable again.
 
@@ -205,20 +235,38 @@ Purpose:
 
 Typical checks include:
 
-- `getblockchaininfo` (`blocks`, `headers`, `initialblockdownload`)
+- `getblockchaininfo` (`blocks`, `headers`, `time` for best-block age)
 - `mnsync status` (`IsBlockchainSynced`, `IsSynced`, `IsFailed`)
 - `getnetworkinfo` (`connections`)
-- `getpeerinfo` (peer count / simple ping summary)
-- `getchaintips` (for example `headers-only` chain tips)
+- `getpeerinfo` (peer count, max ping, peers above a configured ping threshold)
+- `getchaintips` (for example `headers-only`, `valid-fork`, `valid-headers` chain tips)
+- Best-block age vs. a configurable max tip age
 
 Commands:
 
 - `r` – run the readiness check
 - `l` – last 30 lines of `debug.log`
 - `j` – last 30 lines of `journalctl` for the service
+- `n` – abort here and restart the recovery helper from the beginning
 - `x` – skip the readiness step and continue
 
 The readiness check itself is fast (only local RPC calls), but it is often useful to repeat it for a few minutes until the node looks stable enough.
+
+## Controller wallet step
+
+After the sync and readiness phases, the script prints a `protx update_service` command template for the controller wallet.
+
+Where possible, the script tries to:
+
+- Detect the local masternode service IP from `defcon.conf` and `masternode status`
+- Find the matching deterministic MN entry via `protx list registered true`
+- Prefill:
+  - `PROTX_HASH` from `.proTxHash`
+  - `IP:PORT` from `.state.service`
+  - `BLS_SECRET_KEY` from `masternodeblsprivkey` in `defcon.conf`
+  - `FEE_SOURCE_ADDRESS` with the current `state.payoutAddress` as a convenient default
+
+You can replace the suggested fee source address with any funded address from the controller wallet before sending the transaction.
 
 ## Status
 

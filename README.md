@@ -1,13 +1,14 @@
 # DeFCoN Masternode Recovery Helper
 
-Cautious recovery helper for DeFCoN masternodes with optional trusted addnodes, a PoSe-based temporary ban feature, and an automatic recovery mode.
+Cautious recovery helper for DeFCoN masternodes with optional trusted addnodes, a PoSe-based temporary ban feature, and automatic recovery modes.
 
 ## Features
 
-- Four guided modes:
+- Five guided modes:
   - Recovery without trusted addnodes
   - Recovery with trusted addnodes
   - Automatic recovery (fully automated, with trusted addnodes)
+  - Automatic recovery (fully automated, without trusted addnodes)
   - Restore normal mode (revert helper-managed addnodes + optional PoSe unbans)
 - Trusted addnodes:
   - Loaded from `trusted_addnodes.txt`
@@ -21,7 +22,7 @@ Cautious recovery helper for DeFCoN masternodes with optional trusted addnodes, 
   - Cautious daemon stop (systemd + RPC + optional kill) with stop verification
   - Optional disable/mask of the service to prevent unwanted auto-restarts
   - Optional lockfile removal and resync cleanup (`peers.dat`, `banlist.*`, `mncache.dat`, `llmq`, `blocks`, `chainstate`, `indexes`, `evodb`)
-- PoSe integration (recovery with addnodes, automatic recovery, restore mode):
+- PoSe integration (recovery with addnodes, automatic recovery with addnodes, restore mode):
   - Evaluates the deterministic masternode list via `protx list registered true` (includes PoSe-banned nodes)
   - Detects problematic masternodes:
     - PoSe-banned: `state.PoSeBanHeight > 0`
@@ -38,7 +39,7 @@ Cautious recovery helper for DeFCoN masternodes with optional trusted addnodes, 
 ## Files
 
 - `dfcn-mn-recovery.sh` – main script
-- `trusted_addnodes.txt` – optional trusted addnode list (used in mode 2 and mode 3)
+- `trusted_addnodes.txt` – optional trusted addnode list (used in mode 2, mode 3 and as early bootstrap source in mode 4)
 - `recovery_pose_bans.txt` – optional PoSe banlist managed by the script (only if PoSe feature is used)
 
 ## Installation & Start
@@ -84,9 +85,10 @@ On startup, the script will:
   - `1` = Recovery without trusted addnodes
   - `2` = Recovery with trusted addnodes
   - `3` = Automatic recovery (fully automated, with trusted addnodes)
-  - `4` = Restore normal mode
+  - `4` = Automatic recovery (fully automated, without trusted addnodes)
+  - `5` = Restore normal mode
 
-**Note:** `trusted_addnodes.txt` is required for mode 2 and mode 3.
+**Note:** `trusted_addnodes.txt` is required for mode 2 and mode 3, and used as an optional early-bootstrap source in mode 4.
 
 ## Mode 1 – Recovery without trusted addnodes
 
@@ -179,7 +181,46 @@ Simplified flow:
 
 This mode is intended for operators who want a mostly hands-off recovery using trusted addnodes, with only the reference height and controller-wallet transaction performed manually.
 
-## Mode 4 – Restore normal mode
+## Mode 4 – Automatic recovery (without trusted addnodes)
+
+Goal: automatic variant of mode 1 that performs a cautious resync without changing `addnode=` settings and without PoSe-based banlist preparation.
+
+Key properties:
+
+- Uses the same cautious stop / cleanup / restart logic as mode 1, but without interactive confirmations.
+- Does **not** write any helper-managed `addnode=` block into `defcon.conf`.
+- Does **not** prepare or apply any PoSe-based banlist.
+- The only manual input is the reference block height of the correct chain.
+
+Simplified flow:
+
+1. Show current local status and service state.
+2. Create a backup of `defcon.conf`.
+3. Prompt for the reference block height (from explorer or a trusted node).
+4. Stop daemon/service automatically:
+   - Disable the systemd service temporarily to prevent auto-restart (if enabled).
+   - Stop via `systemctl stop`, try `defcon-cli stop`, then `pkill` / `pkill -9` as fallback.
+   - Verify that process, service and RPC are really stopped.
+5. Remove the lockfile if present.
+6. Perform automatic cleanup of local chain/peer/cache data:
+   - `peers.dat`, `banlist.*`, `mncache.dat`, `netfulfilled.dat`
+   - `llmq`, `evodb`, `blocks`, `chainstate`, `indexes`
+7. Restart the daemon on a clean chain and restore the service state as needed.
+8. Optional early-bootstrap support:
+   - If `trusted_addnodes.txt` exists, build a temporary early-bootstrap list in non-interactive mode.
+   - Apply it as a fallback if normal peer discovery does not yield peers after restart.
+9. Start an automatic sync wait loop:
+   - Every 60 seconds print block height and `mnsync` sync state.
+   - Loop ends when `IsSynced = true` and `AssetName = MASTERNODE_SYNC_FINISHED`.
+10. Record the time when full sync was first reached (for later readiness checks).
+11. Hand over to the interactive ProTx readiness menu:
+   - You can repeat readiness checks for a few minutes.
+   - If the node was not PoSe-banned and you only needed a fresh sync, you can skip the `protx update_service` step with `x`.
+12. Show the final local status snapshot and the controller-wallet hint for `protx update_service`.
+
+This mode is intended for nodes that mainly need a fresh, clean sync on the correct chain, without touching their addnode configuration and without PoSe-based ban management.
+
+## Mode 5 – Restore normal mode
 
 Goal: revert helper changes once the node is stable again.
 

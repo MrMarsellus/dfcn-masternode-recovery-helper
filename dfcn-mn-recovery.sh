@@ -2,7 +2,7 @@
 
 set -u
 
-SCRIPT_VERSION="0.5.1"
+SCRIPT_VERSION="0.5.2"
 
 DEFAULT_DEFCON_USER="defcon"
 DEFAULT_DEFCON_HOME="/home/defcon"
@@ -1791,23 +1791,59 @@ show_stop_summary() {
 
 recovery_abort_notice() {
   local exit_code="$?"
+  local enabled_state="unknown"
+  local should_warn=0
 
-  if [[ "${SERVICE_WAS_DISABLED}" -eq 1 || "${SERVICE_WAS_MASKED}" -eq 1 ]]; then
+  if [[ "${SERVICE_WAS_DISABLED}" -ne 1 && "${SERVICE_WAS_MASKED}" -ne 1 ]]; then
+    return "${exit_code}"
+  fi
+
+  if service_unit_exists; then
+    enabled_state="$(systemctl is-enabled "${DEFAULT_SERVICE}" 2>/dev/null || true)"
+
+    case "${enabled_state}" in
+      masked)
+        should_warn=1
+        ;;
+      disabled|indirect|static|generated|transient|linked|linked-runtime|alias|bad|not-found)
+        should_warn=1
+        ;;
+      enabled|enabled-runtime)
+        should_warn=0
+        ;;
+      *)
+        if ! systemctl is-enabled "${DEFAULT_SERVICE}" >/dev/null 2>&1; then
+          should_warn=1
+        fi
+        ;;
+    esac
+  else
+    should_warn=0
+  fi
+
+  if [[ "${should_warn}" -eq 1 ]]; then
     print_line
-    warn "The script is exiting while the service may still be in a temporary recovery state."
+    warn "The script is exiting while the service is currently not enabled normally."
 
-    if [[ "${SERVICE_WAS_DISABLED}" -eq 1 ]]; then
-      warn "Service note: ${DEFAULT_SERVICE} may still be disabled."
-      echo "Manual check: systemctl is-enabled ${DEFAULT_SERVICE}"
-      echo "Manual fix  : systemctl enable ${DEFAULT_SERVICE}"
-    fi
-
-    if [[ "${SERVICE_WAS_MASKED}" -eq 1 ]]; then
-      warn "Service note: ${DEFAULT_SERVICE} may still be masked."
-      echo "Manual check: systemctl is-enabled ${DEFAULT_SERVICE}"
-      echo "Manual fix  : systemctl unmask ${DEFAULT_SERVICE}"
-      echo "              systemctl enable ${DEFAULT_SERVICE}"
-    fi
+    case "${enabled_state}" in
+      masked)
+        warn "Service note: ${DEFAULT_SERVICE} is currently masked."
+        echo "Manual check: systemctl is-enabled ${DEFAULT_SERVICE}"
+        echo "Manual fix  : systemctl unmask ${DEFAULT_SERVICE}"
+        echo "              systemctl enable ${DEFAULT_SERVICE}"
+        ;;
+      disabled|indirect|static|generated|transient|linked|linked-runtime|alias|bad|not-found)
+        warn "Service note: ${DEFAULT_SERVICE} is currently ${enabled_state}."
+        echo "Manual check: systemctl is-enabled ${DEFAULT_SERVICE}"
+        echo "Manual fix  : systemctl enable ${DEFAULT_SERVICE}"
+        ;;
+      *)
+        warn "Service note: ${DEFAULT_SERVICE} may still be disabled or masked."
+        echo "Manual check: systemctl is-enabled ${DEFAULT_SERVICE}"
+        echo "Manual fix  : systemctl unmask ${DEFAULT_SERVICE}"
+        echo "              systemctl enable ${DEFAULT_SERVICE}"
+        ;;
+    esac
 
     echo "After that, start it again if needed:"
     echo "  systemctl start ${DEFAULT_SERVICE}"

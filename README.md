@@ -30,6 +30,13 @@ Cautious recovery helper for DeFCoN masternodes with optional trusted addnodes, 
   - Derives the service IP from `state.service` (IPv4)
   - Optional creation of a temporary PoSe-based banlist that is applied with `setban` after cleanup and restart
   - Tracking file `recovery_pose_bans.txt` with states `prepared` and `applied` for clean unban in restore mode
+- Automatic restore scheduler:
+  - After recovery runs that leave temporary helper-managed recovery state active, the script can schedule an automatic restore for later cleanup.
+  - Default delay: **48 hours** until the first automatic restore attempt.
+  - If restore is not recommended yet, the script automatically retries after **12 hours**.
+  - Default retry limit: **2 retries**; after that, restore can continue in forced mode even if conditions are still not ideal.
+  - Uses a small state file with token and retry counter to safely ignore stale scheduled jobs.
+  - Prefers `systemd-run` for scheduling, with `at` as a fallback when `systemd-run` is not available.
 - Monitoring & control:
   - Interactive sync monitoring menu (block height, `mnsync status`, summarized sync state, `debug.log` tail)
   - Interactive ProTx readiness menu after full sync (blockchain info, sync state, connections, peers, chain tips, optional log views)
@@ -41,6 +48,8 @@ Cautious recovery helper for DeFCoN masternodes with optional trusted addnodes, 
 - `dfcn-mn-recovery.sh` – main script
 - `trusted_addnodes.txt` – optional trusted addnode list (used in mode 2, mode 3 and as early bootstrap source in mode 4)
 - `recovery_pose_bans.txt` – optional PoSe banlist managed by the script (only if PoSe feature is used)
+- `autorestore_pending.txt` – auto-restore scheduler state file in the node data directory
+  - Tracks a token, retry counter and planned execution time for automatic restore runs.
 
 ## Installation & Start
 
@@ -89,6 +98,44 @@ On startup, the script will:
   - `5` = Restore normal mode
 
 **Note:** `trusted_addnodes.txt` is required for mode 2 and mode 3, and used as an optional early-bootstrap source in mode 4.
+
+## Automatic restore
+
+When a recovery run leaves temporary helper-managed recovery state behind, the script can schedule an automatic restore to revert those temporary changes later. Recovery state currently means a helper-managed trusted addnode block in `defcon.conf` and/or a tracked PoSe recovery PoSe-ban file. 
+
+### Default timing
+
+- Initial auto-restore attempt after **48 hours**.  
+- If the node is not considered ready yet, retry after **12 hours**.  
+- Maximum automatic retries before forced restore: **2**.
+
+These defaults are controlled via:
+
+- `AUTORESTOREDELAYSECONDS` (default: `48 * 3600`)
+- `AUTORESTORERETRYSECONDS` (default: `12 * 3600`)
+- `AUTORESTOREMAXRETRIES` (default: `2`)
+
+### How it works
+
+1. After a recovery run with temporary recovery state still active, the script can schedule an automatic restore job.
+2. A small state file (`autorestore_pending.txt` in the data dir) is written with a random token, planned execution time and retry counter.
+3. At execution time, the scheduled job checks whether the stored token still matches the current state file; stale scheduled jobs are ignored safely.
+4. The script checks whether restore is recommended (for example READY + fully synced). If not, it increments the retry counter and schedules a new restore attempt after the configured retry delay.
+5. Once restore continues (either because the node is ready or because the retry limit has been reached), the script runs the regular restore logic in non-interactive mode:
+   - Remove the helper-managed addnode section from `defcon.conf`.
+   - Restart the service with the original configuration.
+   - Remove tracked PoSe bans if `recovery_pose_bans.txt` exists and RPC is available.
+6. After a successful automatic restore, the state file and helper-managed PoSe banlist can be cleaned up.
+
+### Scheduler backend
+
+- Preferred: `systemd-run` transient unit scheduling with the configured delay.
+- Fallback: `at` when `systemd-run` is not available. Old `at` jobs cannot be cleaned up reliably, but stale jobs are neutralized by the token check in the state file.
+
+### Interaction with manual restore
+
+- Manual restore via mode 5 is possible at any time and cancels any previously scheduled automatic restore job before starting, so that no duplicate restore runs happen later.
+- Automatic restore is only scheduled when temporary recovery state is still active after the recovery run; plain recovery without helper-managed addnodes or PoSe bans does not create auto-restore jobs.
 
 ## Mode 1 – Recovery without trusted addnodes
 
@@ -150,6 +197,7 @@ Detailed flow:
 18. Open the interactive sync monitoring menu until full sync is reached.
 19. Open the interactive ProTx readiness menu to re-check chain and peer quality before `protx update_service`.
 20. Show the controller-wallet hint for `protx update_service`.
+21. If temporary recovery state is still active after the recovery workflow, an automatic restore can be scheduled for later cleanup of helper-managed addnodes and PoSe bans.
 
 This mode is intended for nodes that benefit from a curated peer set during recovery, and especially for nodes that were stuck on a wrong fork where pre-stop addnode checks would produce unreliable results.
 
@@ -178,6 +226,7 @@ Simplified flow:
 9. Write the verified addnodes into the managed block in `defcon.conf` and perform a controlled config reload (stop + start) to activate them.
 10. Apply the prepared PoSe-banlist (if present) after restart and show the current sync state once.
 11. Hand over to the interactive ProTx readiness menu and then to the controller-wallet hint.
+12. If temporary recovery state is still active after the automatic recovery workflow, an automatic restore can be scheduled for later cleanup of helper-managed addnodes and PoSe bans.
 
 This mode is intended for operators who want a mostly hands-off recovery using trusted addnodes, with only the reference height and controller-wallet transaction performed manually.
 
@@ -222,7 +271,7 @@ This mode is intended for nodes that mainly need a fresh, clean sync on the corr
 
 ## Mode 5 – Restore normal mode
 
-Goal: revert helper changes once the node is stable again.
+Goal: revert helper changes once the node is stable again, either manually or via the scheduled automatic restore path.
 
 1. Safety check:
    - Read `masternode status` and `mnsync status`.

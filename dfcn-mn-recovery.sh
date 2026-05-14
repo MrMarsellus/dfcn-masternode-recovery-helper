@@ -56,6 +56,13 @@ EARLY_BOOTSTRAP_TARGET_COUNT=5
 EARLY_BOOTSTRAP_MAX_CANDIDATES=25
 EARLY_BOOTSTRAP_FILE="${DEFAULT_DATA_DIR}/early_bootstrap_nodes.txt"
 
+# --- Auto-restore scheduler ---
+AUTO_RESTORE_DELAY_SECONDS=$((48 * 3600))    # 48 hours until auto-restore
+AUTO_RESTORE_RETRY_SECONDS=$((12 * 3600))    # retry 12 hours later if restore is not recommended yet
+AUTO_RESTORE_MAX_RETRIES=2                   # after 2 retries, force auto-restore even if not ready
+AUTO_RESTORE_STATE_FILE="${DEFAULT_DATA_DIR}/auto_restore_pending.txt"
+AUTO_RESTORE_UNIT="dfcn-autorestore-${DEFAULT_SERVICE}"
+
 print_line() {
   echo "------------------------------------------------------------"
 }
@@ -1585,6 +1592,8 @@ apply_prepared_pose_bans() {
 }
 
 remove_tracked_pose_bans() {
+  local mode="${1:-interactive}"
+
   print_line
   info "Checking for recovery-helper temporary PoSe bans..."
 
@@ -1604,7 +1613,13 @@ remove_tracked_pose_bans() {
 
   if [ "${#TRACKED_POSE_IPS[@]}" -eq 0 ]; then
     warn "PoSe banlist file exists but contains no valid tracked IPs."
-    if ask_yes_no "Do you want to remove the empty or invalid PoSe banlist file now?"; then
+    if [[ "${mode}" != "non_interactive" ]]; then
+      if ask_yes_no "Do you want to remove the empty or invalid PoSe banlist file now?"; then
+        rm -f "${POSE_BANLIST_FILE}"
+        success "PoSe banlist file removed."
+      fi
+    else
+      warn "Removing empty or invalid PoSe banlist file in non-interactive mode."
       rm -f "${POSE_BANLIST_FILE}"
       success "PoSe banlist file removed."
     fi
@@ -1620,19 +1635,23 @@ remove_tracked_pose_bans() {
   done
   print_line
 
-  if ! ask_yes_no "Do you want to remove these recovery-helper PoSe bans now?"; then
-    warn "Removal of tracked PoSe bans skipped by user."
-    return 0
+  if [[ "${mode}" != "non_interactive" ]]; then
+    if ! ask_yes_no "Do you want to remove these recovery-helper PoSe bans now?"; then
+      warn "Removal of tracked PoSe bans skipped by user."
+      return 0
+    fi
+  else
+    info "Removing tracked PoSe bans in non-interactive mode."
   fi
 
   local removed=0
   local missing=0
+  local ip
 
   for ip in "${TRACKED_POSE_IPS[@]}"; do
     if run_cli setban "${ip}" remove >/dev/null 2>&1; then
       removed=$((removed + 1))
     else
-      # could be "not currently banned"
       missing=$((missing + 1))
       warn "Ban for IP not found or already expired: ${ip}"
     fi
@@ -1640,15 +1659,28 @@ remove_tracked_pose_bans() {
 
   print_line
   echo "Tracked PoSe ban removal summary:"
-  echo " - Successfully removed: ${removed}"
+  echo " - Successfully removed                : ${removed}"
   echo " - Not currently banned or remove failed: ${missing}"
   print_line
 
-  if ask_yes_no "Do you want to delete the recovery-helper PoSe banlist file now?"; then
-    rm -f "${POSE_BANLIST_FILE}"
-    success "Recovery-helper PoSe banlist file removed."
+  if [[ "${mode}" != "non_interactive" ]]; then
+    if ask_yes_no "Do you want to delete the recovery-helper PoSe banlist file now?"; then
+      rm -f "${POSE_BANLIST_FILE}"
+      if (( removed > 0 )); then
+        success "Recovery-helper PoSe banlist file removed after tracked bans were cleaned up."
+      else
+        warn "Recovery-helper PoSe banlist file removed, but no active bans could be removed."
+      fi
+    else
+      warn "PoSe banlist file was kept."
+    fi
   else
-    warn "PoSe banlist file was kept."
+    rm -f "${POSE_BANLIST_FILE}"
+    if (( removed > 0 )); then
+      success "Recovery-helper PoSe banlist file removed after tracked bans were cleaned up."
+    else
+      warn "Recovery-helper PoSe banlist file removed, but no active bans could be removed."
+    fi
   fi
 }
 
@@ -1757,6 +1789,34 @@ show_stop_summary() {
   print_line
 }
 
+recovery_abort_notice() {
+  local exit_code="$?"
+
+  if [[ "${SERVICE_WAS_DISABLED}" -eq 1 || "${SERVICE_WAS_MASKED}" -eq 1 ]]; then
+    print_line
+    warn "The script is exiting while the service may still be in a temporary recovery state."
+
+    if [[ "${SERVICE_WAS_DISABLED}" -eq 1 ]]; then
+      warn "Service note: ${DEFAULT_SERVICE} may still be disabled."
+      echo "Manual check: systemctl is-enabled ${DEFAULT_SERVICE}"
+      echo "Manual fix  : systemctl enable ${DEFAULT_SERVICE}"
+    fi
+
+    if [[ "${SERVICE_WAS_MASKED}" -eq 1 ]]; then
+      warn "Service note: ${DEFAULT_SERVICE} may still be masked."
+      echo "Manual check: systemctl is-enabled ${DEFAULT_SERVICE}"
+      echo "Manual fix  : systemctl unmask ${DEFAULT_SERVICE}"
+      echo "              systemctl enable ${DEFAULT_SERVICE}"
+    fi
+
+    echo "After that, start it again if needed:"
+    echo "  systemctl start ${DEFAULT_SERVICE}"
+    print_line
+  fi
+
+  return "${exit_code}"
+}
+
 stop_daemon_cautious() {
   print_line
   warn "The next step can stop the daemon and service."
@@ -1844,14 +1904,21 @@ stop_daemon_cautious() {
 }
 
 remove_lock_file() {
+  local mode="${1:-interactive}"
   local lock_file="${DEFAULT_DATA_DIR}/.lock"
 
   if [ -f "${lock_file}" ]; then
-    if ask_yes_no "A lock file was found. Remove it?"; then
+    if [[ "${mode}" != "non_interactive" ]]; then
+      if ask_yes_no "A lock file was found. Remove it?"; then
+        rm -f "${lock_file}"
+        success "Lock file removed."
+      else
+        warn "Lock file was not removed."
+      fi
+    else
+      info "Removing lock file in non-interactive mode."
       rm -f "${lock_file}"
       success "Lock file removed."
-    else
-      warn "Lock file was not removed."
     fi
   else
     info "No lock file found."
@@ -1912,9 +1979,9 @@ write_trusted_addnodes_to_conf() {
 
   awk -v start="${MANAGED_START}" -v end="${MANAGED_END}" '
     $0 == start {skip=1; next}
-    $0 == end {skip=0; next}
+    $0 == end   {skip=0; next}
     !skip {print}
-  ' "${DEFAULT_CONF_FILE}" | sed '/^addnode=/d' > "${DEFAULT_CONF_FILE}.tmp"
+  ' "${DEFAULT_CONF_FILE}" > "${DEFAULT_CONF_FILE}.tmp"
 
   {
     echo
@@ -1930,12 +1997,23 @@ write_trusted_addnodes_to_conf() {
 }
 
 restore_normal_mode_conf() {
+  local mode="${1:-interactive}"
+
   print_line
   warn "Restore normal mode will remove the helper-managed addnode section from defcon.conf."
 
-  if ! ask_yes_no "Do you want to remove the managed trusted addnode section now?"; then
-    warn "Restore step skipped by user."
+  if ! has_managed_addnode_section; then
+    info "No helper-managed trusted addnode section found in defcon.conf."
     return 0
+  fi
+
+  if [[ "${mode}" != "non_interactive" ]]; then
+    if ! ask_yes_no "Do you want to remove the managed trusted addnode section now?"; then
+      warn "Restore step skipped by user."
+      return 0
+    fi
+  else
+    info "Removing helper-managed addnode section in non-interactive mode."
   fi
 
   cp "${DEFAULT_CONF_FILE}" "${DEFAULT_CONF_FILE}.pre-restore.$(date +%Y%m%d-%H%M%S)"
@@ -2080,6 +2158,29 @@ show_protx_placeholder() {
   print_line
 }
 
+is_sync_finished() {
+  local sync_json="${1:-}"
+  local asset_name is_blockchain_synced is_synced is_failed_raw
+
+  if [[ -z "${sync_json}" ]]; then
+    sync_json="$(run_cli mnsync status 2>/dev/null || true)"
+  fi
+
+  asset_name="$(echo "${sync_json}" | jq -r '.AssetName // empty' 2>/dev/null)"
+  is_blockchain_synced="$(echo "${sync_json}" | jq -r '.IsBlockchainSynced // empty' 2>/dev/null)"
+  is_synced="$(echo "${sync_json}" | jq -r '.IsSynced // empty' 2>/dev/null)"
+  is_failed_raw="$(echo "${sync_json}" | jq -r '.IsFailed // "false"' 2>/dev/null)"
+
+  if [[ "${asset_name}" == "MASTERNODESYNCFINISHED" ]] \
+     && [[ "${is_blockchain_synced}" == "true" ]] \
+     && [[ "${is_synced}" == "true" ]] \
+     && [[ "${is_failed_raw}" != "true" ]]; then
+    return 0
+  fi
+
+  return 1
+}
+
 interactive_monitoring_menu() {
   local skip_intro=0
   [[ "${1:-}" == "--no-intro" ]] && skip_intro=1
@@ -2090,7 +2191,7 @@ interactive_monitoring_menu() {
     echo "Use the following menu options to monitor sync progress."
     echo "Only continue with x when all of the following are true:"
     echo "  - Local block height matches the reference block height"
-    echo "  - Masternode sync stage is 'MASTERNODE_SYNC_FINISHED'"
+    echo "  - Masternode sync stage is 'MASTERNODESYNCFINISHED'"
     echo "  - 'Blockchain synced' is true"
     echo "  - 'Masternode synced' is true"
     print_line
@@ -2156,10 +2257,12 @@ show_sync_progress() {
     is_failed="false"
   fi
 
-  if [[ "$is_synced" == "true" && "$asset_name" == "MASTERNODE_SYNC_FINISHED" ]]; then
+  if is_sync_finished "$sync_json"; then
     if [[ -z "${SYNC_READY_SINCE_EPOCH}" ]]; then
       SYNC_READY_SINCE_EPOCH="$(date +%s)"
     fi
+  else
+    SYNC_READY_SINCE_EPOCH=""
   fi
 
   echo
@@ -2179,7 +2282,7 @@ show_sync_progress() {
 
   echo
 
-  if [[ "$is_synced" == "true" && "$asset_name" == "MASTERNODE_SYNC_FINISHED" ]]; then
+  if is_sync_finished "$sync_json"; then
     success "Sync completed. You can continue with 'x' and the next recovery step."
   else
     warn "Your node is still syncing. Please wait before continuing."
@@ -2608,6 +2711,7 @@ run_recovery_plain_mode() {
   info "Showing final local status snapshot..."
   show_local_status
   show_protx_placeholder
+
 }
 
 run_recovery_plain_auto_mode() {
@@ -2759,6 +2863,7 @@ run_recovery_plain_auto_mode() {
   info "Showing final local status snapshot..."
   show_local_status
   show_protx_placeholder
+
 }
 
 wait_for_rpc() {
@@ -2991,6 +3096,12 @@ run_recovery_addnodes_mode() {
     info "Showing final local status snapshot..."
     show_local_status
     show_protx_placeholder
+
+    if is_recovery_state_active; then
+      schedule_auto_restore "${AUTO_RESTORE_DELAY_SECONDS}" 0
+    else
+      info "No temporary recovery state detected after recovery run. Automatic restore scheduling skipped."
+    fi
 }
 
 run_recovery_addnodes_auto_mode() {
@@ -3186,7 +3297,7 @@ run_recovery_addnodes_auto_mode() {
   print_line
   info "Phase 5 – Writing verified addnodes to defcon.conf and restarting daemon (automatic)"
   print_line
-
+  
   dedupe_good_addnodes_array
   cp "${DEFAULT_CONF_FILE}" "${DEFAULT_CONF_FILE}.pre-managed.$(date +%Y%m%d-%H%M%S)"
 
@@ -3194,7 +3305,7 @@ run_recovery_addnodes_auto_mode() {
     $0 == start {skip=1; next}
     $0 == end {skip=0; next}
     !skip {print}
-  ' "${DEFAULT_CONF_FILE}" | sed '/^addnode=/d' > "${DEFAULT_CONF_FILE}.tmp"
+  ' "${DEFAULT_CONF_FILE}" > "${DEFAULT_CONF_FILE}.tmp"
 
   {
     echo
@@ -3247,50 +3358,95 @@ run_recovery_addnodes_auto_mode() {
   info "Showing final local status snapshot..."
   show_local_status
   show_protx_placeholder
+
+  if is_recovery_state_active; then
+    schedule_auto_restore "${AUTO_RESTORE_DELAY_SECONDS}" 0
+  else
+    info "No temporary recovery state detected after recovery run. Automatic restore scheduling skipped."
+  fi
 }
 
 check_ready_for_restore() {
+  local mode="${1:-interactive}"
+
   while true; do
     print_line
     info "Checking if masternode is ready for restore normal mode..."
 
-    local mn_json mn_state mn_status sync_json asset_name is_synced
+    if ! timeout 5 "${DEFAULT_CLI}" -datadir="${DEFAULT_DATA_DIR}" -conf="${DEFAULT_CONF_FILE}" getblockcount >/dev/null 2>&1; then
+      if [ "$mode" = "noninteractive" ]; then
+        warn "Restore readiness check failed: RPC is not responding."
+        return 1
+      fi
 
+      error "Restore normal mode is not recommended yet."
+      echo "RPC is not responding."
+      print_line
+      echo "Choose how to proceed:"
+      echo "1) Check status again"
+      echo "2) Continue with restore normal mode anyway (not recommended)"
+      echo "3) Exit without making changes"
+      print_line
+
+      local choice
+      read -r -p "Enter 1, 2 or 3: " choice
+      case "$choice" in
+        1) continue ;;
+        2)
+          warn "Continuing with restore normal mode despite RPC not responding."
+          return 0
+          ;;
+        3)
+          warn "Aborting restore normal mode at user request."
+          exit 1
+          ;;
+        *)
+          warn "Invalid selection. Please choose 1, 2 or 3."
+          ;;
+      esac
+      continue
+    fi
+
+    local mn_json sync_json mn_state mn_status asset_name is_synced
     mn_json="$(run_cli masternode status 2>/dev/null || echo "")"
     sync_json="$(run_cli mnsync status 2>/dev/null || echo "")"
 
     mn_state="$(echo "$mn_json" | jq -r '.state // empty' 2>/dev/null)"
     mn_status="$(echo "$mn_json" | jq -r '.status // empty' 2>/dev/null)"
-
     asset_name="$(echo "$sync_json" | jq -r '.AssetName // empty' 2>/dev/null)"
     is_synced="$(echo "$sync_json" | jq -r '.IsSynced // empty' 2>/dev/null)"
 
-    echo "Masternode state : ${mn_state:-unknown}"
+    echo "Masternode state: ${mn_state:-unknown}"
     echo "Masternode status: ${mn_status:-unknown}"
-    echo "Sync stage       : ${asset_name:-unknown}"
-    echo "IsSynced         : ${is_synced:-unknown}"
+    echo "Sync stage: ${asset_name:-unknown}"
+    echo "IsSynced: ${is_synced:-unknown}"
     print_line
 
-    if [[ "$mn_state" == "READY" && "$is_synced" == "true" && "$asset_name" == "MASTERNODE_SYNC_FINISHED" ]]; then
+    if [[ "$mn_state" == "READY" ]] && is_sync_finished "$sync_json"; then
       success "Masternode appears to be READY and fully synced. Continuing with restore normal mode."
       return 0
     fi
 
+    if [ "$mode" = "noninteractive" ]; then
+      warn "Restore readiness check failed: node is not fully ready yet."
+      return 1
+    fi
+
     error "Restore normal mode is not recommended yet."
     echo "The masternode does not meet the recommended conditions for restore normal mode:"
-    echo "  - state should be 'READY'"
-    echo "  - sync stage should be 'MASTERNODE_SYNC_FINISHED'"
-    echo "  - 'IsSynced' should be true"
+    echo "- state should be READY"
+    echo "- sync stage should be MASTERNODESYNCFINISHED"
+    echo "- Blockchain synced should be true"
+    echo "- IsSynced should be true"
     print_line
     echo "Choose how to proceed:"
-    echo "  1) Check status again"
-    echo "  2) Continue with restore normal mode anyway (not recommended)"
-    echo "  3) Exit without making changes"
+    echo "1) Check status again"
+    echo "2) Continue with restore normal mode anyway (not recommended)"
+    echo "3) Exit without making changes"
     print_line
 
     local choice
     read -r -p "Enter 1, 2 or 3: " choice
-
     case "$choice" in
       1)
         ;;
@@ -3309,20 +3465,224 @@ check_ready_for_restore() {
   done
 }
 
+# ---------------------------------------------------------------------------
+# Auto-restore: check whether a temporary recovery state is still active
+# ---------------------------------------------------------------------------
+is_recovery_state_active() {
+  local managed_present=1
+  local pose_present=1
+
+  if grep -Fq "${MANAGED_START}" "${DEFAULT_CONF_FILE}" 2>/dev/null; then
+    managed_present=0
+  fi
+
+  if [[ -f "${POSE_BANLIST_FILE}" ]]; then
+    pose_present=0
+  fi
+
+  if [[ "${managed_present}" -eq 0 || "${pose_present}" -eq 0 ]]; then
+    return 0
+  fi
+
+  return 1
+}
+
+has_managed_addnode_section() {
+  if grep -Fq "${MANAGED_START}" "${DEFAULT_CONF_FILE}" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Auto-restore: cancel any existing scheduled job (unit + state file)
+# ---------------------------------------------------------------------------
+cancel_auto_restore() {
+  if systemctl list-units --full --all 2>/dev/null | grep -q "${AUTO_RESTORE_UNIT}"; then
+    systemctl stop "${AUTO_RESTORE_UNIT}.service" >/dev/null 2>&1 || true
+    systemctl stop "${AUTO_RESTORE_UNIT}.timer" >/dev/null 2>&1 || true
+  fi
+
+  rm -f "${AUTO_RESTORE_STATE_FILE}" >/dev/null 2>&1 || true
+}
+
+# ---------------------------------------------------------------------------
+# Auto-restore: schedule a new one-shot job via systemd-run
+# $1 = delay in seconds
+# ---------------------------------------------------------------------------
+schedule_auto_restore() {
+  local delay_seconds="${1:-}"
+  local retry_count="${2:-0}"
+  local token run_at_epoch run_at_human script_path
+
+  if ! is_number "${delay_seconds}" || (( delay_seconds <= 0 )); then
+    warn "Auto-restore scheduling skipped because the delay is invalid."
+    return 1
+  fi
+
+  if ! is_number "${retry_count}" || (( retry_count < 0 )); then
+    retry_count=0
+  fi
+
+  mkdir -p "${DEFAULT_DATA_DIR}" >/dev/null 2>&1 || true
+
+  cancel_auto_restore >/dev/null 2>&1 || true
+
+  token="$(date +%s)-${RANDOM}"
+  run_at_epoch=$(( $(date +%s) + delay_seconds ))
+  run_at_human="$(date -d "@${run_at_epoch}" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || date)"
+  script_path="$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")"
+
+  {
+    echo "token=${token}"
+    echo "retry_count=${retry_count}"
+    echo "run_at_epoch=${run_at_epoch}"
+    echo "run_at_human=${run_at_human}"
+    echo "script_path=${script_path}"
+    echo "unit=${AUTO_RESTORE_UNIT}"
+    echo "created_at=$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+  } > "${AUTO_RESTORE_STATE_FILE}"
+
+  chmod 600 "${AUTO_RESTORE_STATE_FILE}" >/dev/null 2>&1 || true
+
+  if command -v systemd-run >/dev/null 2>&1; then
+    if systemd-run \
+      --unit="${AUTO_RESTORE_UNIT}" \
+      --on-active="${delay_seconds}" \
+      --description="DeFCoN recovery helper auto-restore" \
+      "${script_path}" --auto-restore "${token}" >/dev/null 2>&1; then
+      success "Automatic restore scheduled in ${delay_seconds} seconds."
+      info "Planned auto-restore time: ${run_at_human}"
+      info "Auto-restore retry counter: ${retry_count}/${AUTO_RESTORE_MAX_RETRIES}"
+      info "Auto-restore unit: ${AUTO_RESTORE_UNIT}"
+      return 0
+    else
+      warn "systemd-run scheduling failed. Trying fallback with at."
+    fi
+  else
+    warn "systemd-run is not available. Trying fallback with at."
+  fi
+
+  if command -v at >/dev/null 2>&1; then
+    if printf '%q %q %q\n' "${script_path}" "--auto-restore" "${token}" \
+      | at -M -t "$(date -d "@${run_at_epoch}" '+%Y%m%d%H%M.%S' 2>/dev/null)" >/dev/null 2>&1; then
+      success "Automatic restore scheduled in ${delay_seconds} seconds via at."
+      info "Planned auto-restore time: ${run_at_human}"
+      info "Auto-restore retry counter: ${retry_count}/${AUTO_RESTORE_MAX_RETRIES}"
+      info "Note: old at jobs cannot be cleaned up reliably; stale jobs are neutralized by the token check."
+      return 0
+    fi
+  fi
+
+  warn "Automatic restore could not be scheduled automatically."
+  warn "You will need to run restore mode manually later."
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Auto-restore: non-interactive restore run
+# $1 = token from the state file
+# ---------------------------------------------------------------------------
+run_auto_restore() {
+  local token="${1:-}"
+  local saved_token retry_count force_restore=0
+
+  print_line
+  info "Automatic restore mode started."
+  print_line
+
+  if [ -z "$token" ]; then
+    error "Automatic restore aborted because no token was provided."
+    exit 1
+  fi
+
+  if [ ! -f "${AUTO_RESTORE_STATE_FILE}" ]; then
+    warn "Automatic restore state file not found. Nothing to do."
+    exit 0
+  fi
+
+  saved_token="$(grep -E '^token=' "${AUTO_RESTORE_STATE_FILE}" 2>/dev/null | head -n1 | cut -d= -f2-)"
+  retry_count="$(grep -E '^retry_count=' "${AUTO_RESTORE_STATE_FILE}" 2>/dev/null | head -n1 | cut -d= -f2-)"
+
+  if [ -z "$saved_token" ]; then
+    warn "Automatic restore state file has no valid token. Nothing to do."
+    exit 0
+  fi
+
+  if ! is_number "$retry_count"; then
+    retry_count=0
+  fi
+
+  if [ "$token" != "$saved_token" ]; then
+    warn "Ignoring stale automatic restore job because its token is no longer current."
+    exit 0
+  fi
+
+  if ! is_recovery_state_active; then
+    info "No temporary recovery state is active anymore. Auto-restore is not needed."
+    rm -f "${AUTO_RESTORE_STATE_FILE}" >/dev/null 2>&1 || true
+    exit 0
+  fi
+
+  if ! check_ready_for_restore noninteractive; then
+    if [ "$retry_count" -lt "$AUTO_RESTORE_MAX_RETRIES" ]; then
+      warn "Automatic restore is not recommended yet."
+      info "Scheduling another automatic restore retry in ${AUTO_RESTORE_RETRY_SECONDS} seconds."
+      schedule_auto_restore "${AUTO_RESTORE_RETRY_SECONDS}" "$((retry_count + 1))" || true
+      exit 0
+    fi
+
+    warn "Automatic restore readiness check still not ideal after ${retry_count} retries."
+    warn "Retry limit reached. Continuing with automatic restore anyway."
+    force_restore=1
+  fi
+
+  print_line
+  if [ "$force_restore" -eq 1 ]; then
+    warn "Automatic restore will now continue even though the node is not in the recommended ready state."
+  else
+    info "Automatic restore readiness check passed."
+  fi
+
+  run_restore_mode noninteractive
+
+  rm -f "${AUTO_RESTORE_STATE_FILE}" >/dev/null 2>&1 || true
+
+  print_line
+  success "Automatic restore completed successfully."
+  print_line
+  info "Showing final local status snapshot..."
+  show_local_status
+  exit 0
+}
+
 run_restore_mode() {
-  info "Selected: Restore normal mode (remove helper-managed addnodes + PoSe-bans)."
+  local mode="${1:-interactive}"
+
+  info "Selected Restore normal mode: remove helper-managed addnodes / PoSe-bans."
   print_line
   echo "This mode is intended to revert changes made by Recovery with trusted addnodes"
   echo "and to remove temporary PoSe bans created by this helper."
   echo "For the recommended path, the daemon should be running and fully synced before restore is started."
   print_line
 
-  check_ready_for_restore
+  info "Cancelling any previously scheduled automatic restore job before starting restore mode..."
+  cancel_auto_restore
+
+  check_ready_for_restore "$mode"
+
   show_local_status
   check_service_and_process
   backup_conf
 
-  stop_daemon_cautious || exit 1
+  if [ "$mode" = "noninteractive" ]; then
+    stop_daemon_for_config_reload || {
+      error "Automatic restore aborted because a safe stopped state could not be confirmed."
+      exit 1
+    }
+  else
+    stop_daemon_cautious || exit 1
+  fi
 
   if ! verify_daemon_stopped; then
     error "Verified stopped state was not reached."
@@ -3330,15 +3690,21 @@ run_restore_mode() {
     exit 1
   fi
 
-  remove_lock_file
-  restore_normal_mode_conf
+  remove_lock_file "$mode"
+  restore_normal_mode_conf "$mode"
 
-  restore_service_if_needed || exit 1
-  wait_for_rpc 30 5 || warn "RPC not yet available; PoSe ban removal may fail."
-  
-  remove_tracked_pose_bans
+  restore_service_if_needed || {
+    error "Restore failed because the service could not be started again."
+    exit 1
+  }
 
-  if [[ -f "${EARLY_BOOTSTRAP_FILE}" ]]; then
+  if wait_for_rpc 30 5; then
+    remove_tracked_pose_bans "$mode"
+  else
+    warn "RPC did not become available after restart. Temporary PoSe ban removal was skipped."
+  fi
+
+  if [ -f "${EARLY_BOOTSTRAP_FILE}" ]; then
     if rm -f "${EARLY_BOOTSTRAP_FILE}" >/dev/null 2>&1; then
       success "Temporary early bootstrap file removed: ${EARLY_BOOTSTRAP_FILE}"
     else
@@ -3353,6 +3719,17 @@ run_restore_mode() {
 }
 
 main() {
+  trap 'recovery_abort_notice' EXIT INT TERM
+  
+  if [[ "${1:-}" == "--auto-restore" ]]; then
+    local token="${2:-}"
+    check_root
+    check_conf_file
+    check_binaries
+    run_auto_restore "${token}"
+    exit 0
+  fi
+
   show_intro
   check_root
   show_defaults
@@ -3393,11 +3770,14 @@ main() {
   if [[ "${MODE}" == "recovery_addnodes" ]]; then
     print_line
     echo "Note:"
-    echo "Once your masternode has been fully synced and stable for several days, run this script again and select"
-    echo "\"Restore normal mode\" to revert from helper-managed trusted addnodes and remove temporary PoSe bans."
+    echo "Temporary recovery changes such as helper-managed trusted addnodes and temporary PoSe bans"
+    echo "will be reverted automatically after $((AUTO_RESTORE_DELAY_SECONDS / 3600)) hours, if the"
+    echo "temporary recovery state is still active and the node is ready for restore."
+    echo "You can also run this script again earlier and select \"Restore normal mode\" to revert them manually."
   fi
 
   print_line
 }
 
 main "$@"
+
